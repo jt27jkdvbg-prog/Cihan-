@@ -1,0 +1,50 @@
+me: Video Üret
+
+on:
+  workflow_dispatch:
+    inputs:
+      konu:
+        description: "Video konusu / başlığı"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  video:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: FFmpeg ve yazı tipi kur
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-dejavu-core
+
+      - name: Python paketlerini kur
+        run: pip install -r requirements.txt
+
+      - name: Videoyu üret
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          KONU: ${{ inputs.konu }}
+        run: python generate.py --topic "$KONU"
+
+      - name: Sonucu Release olarak yayınla
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KONU: ${{ inputs.konu }}
+        run: |
+          TITLE=$(python -c "import json;print(json.load(open('output/metadata.json'))['title'])")
+          gh release create "video-${{ github.run_number }}" \
+            output/video.mp4 output/metadata.json output/thumbnail.jpg output/script.json \
+            --title "$TITLE" --notes "Konu: $KONU"
