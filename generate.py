@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Otomatik video üretim hattı - Aşama 1
+Otomatik video üretim hattı - Aşama 2 (hareketli klipler)
 
-Konu  ->  araştırma  ->  senaryo  ->  görseller  ->  seslendirme  ->  montaj
-Çıktı: output/video.mp4 (dikey 1080x1920, altyazılı)
+Konu -> araştırma -> senaryo -> ana kareler (FLUX) -> hareketli klipler (Boreal)
+     -> seslendirme -> montaj (altyazı + ses efekti + müzik) -> output/video.mp4
 """
 import argparse
 import base64
 import glob
 import json
+import math
 import os
 import random
 import re
@@ -23,33 +24,57 @@ from pathlib import Path
 # AYARLAR (istersen GitHub'da "Variables" bölümünden değiştirebilirsin)
 # ----------------------------------------------------------------------------
 W, H, FPS = 1080, 1920, 30
-PAD = 0.35  # sahneler arası kısa sessizlik (saniye)
+PAD = 0.4  # sahneler arası kısa nefes payı (saniye)
 
 
 def _env(name, default):
     return os.environ.get(name) or default
 
 
-def _models(name, default):
+def _list(name, default):
     return [m.strip() for m in _env(name, default).split(",") if m.strip()]
 
 
 # Gemini (ücretsiz katman). Sırayla dener; biri çalışmazsa sonrakine geçer.
-RESEARCH_MODELS = _models("GEMINI_RESEARCH_MODELS", "gemini-2.5-flash,gemini-2.5-flash-lite")
-SCRIPT_MODELS = _models("GEMINI_SCRIPT_MODELS", "gemini-3.8-flash,gemini-3.6-flash,gemini-2.5-flash")
-# Cloudflare Workers AI (ücretsiz: günde 10.000 nöron)
-IMAGE_MODEL = _env("IMAGE_MODEL", "@cf/black-forest-labs/flux-1-schnell")
-IMAGE_STEPS = int(_env("IMAGE_STEPS", "6"))
-# Ses
-TTS_ENGINE = _env("TTS_ENGINE", "edge")  # edge (ücretsiz) | elevenlabs (ücretli, daha kaliteli)
+RESEARCH_MODELS = _list("GEMINI_RESEARCH_MODELS", "gemini-3.8-flash,gemini-3.6-flash")
+SCRIPT_MODELS = _list("GEMINI_SCRIPT_MODELS", "gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash-lite")
+GEMINI_TIMEOUT_MS = int(_env("GEMINI_TIMEOUT_SEC", "90")) * 1000
+
+# Görsel motoru: auto = FAL_KEY varsa fal.ai (dikey, daha kaliteli), yoksa Cloudflare (ücretsiz)
+IMAGE_ENGINE = _env("IMAGE_ENGINE", "auto")  # auto | fal | cloudflare
+CF_IMAGE_MODEL = _env("CF_IMAGE_MODEL", "@cf/black-forest-labs/flux-1-schnell")
+CF_STEPS = int(_env("CF_STEPS", "6"))
+# Hareketli klip: auto = FAL_KEY varsa üretir (ücretli), yoksa kamera hareketli ücretsiz mod
+MOTION = _env("MOTION", "auto")  # auto | off
+
+# fal.ai: ana kare (görsel) ve hareketli klip
+FAL_IMAGE_MODEL = _env("FAL_IMAGE_MODEL", "fal-ai/flux/dev")
+VIDEO_MODEL = _env("VIDEO_MODEL", "creatify/boreal")
+VIDEO_RES = _env("VIDEO_RES", "720p")
+AMBIENCE_VOLUME = float(_env("AMBIENCE_VOLUME", "0.3"))  # kliplerin kendi ses efekti seviyesi
+
+# Ses motorları sırayla denenir: gemini (en doğal), edge (ücretsiz), gtts (yedek), elevenlabs (ücretli)
+TTS_ENGINES = _list("TTS_ENGINES", "gemini,edge,gtts")
+GEMINI_TTS_MODEL = _env("GEMINI_TTS_MODEL", "gemini-3.8-flash-tts")
+GEMINI_VOICE = _env("GEMINI_VOICE", "Charon")
+GEMINI_TTS_STYLE = _env(
+    "GEMINI_TTS_STYLE",
+    "Read the following in Turkish like a cinematic documentary narrator: calm, deep, "
+    "natural pacing, clear pronunciation, subtle emotion",
+)
 EDGE_VOICE = _env("EDGE_VOICE", "tr-TR-AhmetNeural")  # kadın sesi: tr-TR-EmelNeural
 EDGE_RATE = _env("EDGE_RATE", "+0%")
 GTTS_LANG = _env("GTTS_LANG", "tr")
 ELEVEN_MODEL = _env("TTS_MODEL", "eleven_multilingual_v2")
 ELEVEN_VOICE = _env("ELEVEN_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")
 
-TARGET_SECONDS = int(_env("TARGET_SECONDS", "60"))
+TARGET_SECONDS = int(_env("TARGET_SECONDS", "45"))
 VIDEO_DILI = _env("VIDEO_DILI", "Türkçe")
+
+NEGATIVE = (
+    "speech, talking, lip movement, subtitles, text, letters, watermark, logo, "
+    "distorted face, extra fingers, morphing, flicker"
+)
 
 
 def log(msg):
@@ -61,7 +86,7 @@ def retry(fn, what, tries=3, wait=6):
         try:
             return fn()
         except Exception as e:  # noqa: BLE001
-            log(f"  ! {what} başarısız (deneme {i}/{tries}): {e}")
+            log(f"  ! {what} başarısız (deneme {i}/{tries}): {str(e)[:300]}")
             if i == tries:
                 raise
             time.sleep(wait * i)
@@ -87,52 +112,72 @@ Birden fazla güvenilir kaynakla teyit edemediğin veya emin olmadığın bilgiy
 EK KAYNAK (Vikipedi):
 {ctx}"""
 
-SCRIPT_PROMPT = """Aşağıdaki araştırma notlarına dayanarak "{topic}" konusunda dikey formatta (YouTube Shorts / TikTok / Reels) KISA FİLM tadında bir video hazırla.
+SCRIPT_PROMPT = """Aşağıdaki araştırma notlarına dayanarak "{topic}" konusunda dikey formatta (YouTube Shorts / TikTok / Reels) KISA FİLM tadında bir video hazırla. Görseller yapay zekâ ile üretilip hareketlendirilecek.
 
 KURALLAR:
 - Anlatım dili: {dil}. Toplam anlatım yaklaşık {kelime} kelime olsun (yaklaşık {sure} saniye).
-- {n_min}-{n_max} sahne. Her sahnenin anlatımı 1-3 cümle.
+- {n_min}-{n_max} sahne. Her sahnenin anlatımı 1-2 kısa cümle (en fazla ~12 saniye okunacak kadar).
 - Yapı: İlk sahnede merak uyandıran güçlü bir açılış (izleyiciyi ilk 3 saniyede yakala). Ortada gerilim ve gelişme. Sonda etkileyici bir kapanış.
 - SADECE notlardaki doğrulanmış bilgileri kullan. "DOĞRULANAMADI" işaretli veya emin olmadığın hiçbir şeyi yazma, uydurma.
 - Anlatım metni sesli okunacak: rakamları ve kısaltmaları okunduğu gibi yaz; emoji, parantez, sahne yönergesi koyma.
-- "style": TÜM görsellerde ortak kullanılacak İNGİLİZCE görsel stil tarifi (ışık, renk paleti, sinematik üslup, lens, atmosfer). Tekrar eden bir karakter varsa görünüşünü burada ayrıntılı tarif et.
-- Her sahne için "image_prompt": İNGİLİZCE, o sahneyi anlatan somut, sinematik görsel tarifi. Ana özne kadrajın MERKEZİNDE olsun (görsel sonra dikey kırpılacak). Görselde yazı, harf, logo OLMASIN. Gerçek ve tanınabilir kişilerin yüzü OLMASIN (isim verme; silüet, arkadan görünüm, eller, nesneler, manzara, sembolik sahneler kullan).
+- "style": TÜM sahnelerde ortak kullanılacak İNGİLİZCE görsel stil tarifi. Varsayılan olarak fotogerçekçi sinema estetiği (ışık, renk paleti, lens, atmosfer, film greni). Tekrar eden karakter varsa yaşını, saçını, kıyafetini, yüz özelliklerini burada AYRINTILI ve sabit biçimde tarif et ki her sahnede aynı kişi görünsün.
+- Her sahne için:
+  * "image_prompt": İNGİLİZCE, sahnenin İLK KARESİNİ anlatan somut sinematik görsel tarifi (kadraj, özne, mekân, ışık). Görselde yazı, harf, logo OLMASIN.
+  * "motion_prompt": İNGİLİZCE, o karede NE HAREKET EDİYOR: karakterin doğal ve gerçekçi hareketi (yürümek, dönmek, nefes almak, bakmak, el hareketi) ve KAMERA hareketi (yavaş dolly-in, yan kayma, hafif el kamerası vb.). Tek, net, sade bir hareket yaz. Karakter konuşmasın.
+  * "sound": İNGİLİZCE, sadece ortam sesi ve ses efekti (rüzgâr, adım sesi, dalga, uğultu...). Müzik ve konuşma YAZMA.
+- Gerçek ve tanınabilir kişilerin yüzü OLMASIN (isim verme; silüet, arkadan görünüm, anonim karakterler, nesneler, manzara, sembolik sahneler kullan).
 - "title": en fazla 70 karakter, merak uyandıran başlık. "description": 2-3 cümlelik açıklama + 3-5 hashtag. "tags": 8-12 etiket.
 
 ARAŞTIRMA NOTLARI:
 {notes}
 
 SADECE geçerli JSON döndür, başka hiçbir şey yazma:
-{{"title": "...", "description": "...", "tags": ["..."], "style": "...", "scenes": [{{"narration": "...", "image_prompt": "..."}}]}}"""
+{{"title": "...", "description": "...", "tags": ["..."], "style": "...", "scenes": [{{"narration": "...", "image_prompt": "...", "motion_prompt": "...", "sound": "..."}}]}}"""
 
-UA = {"User-Agent": "video-fabrikasi/1.0 (kisisel proje)"}
+UA = {"User-Agent": "video-fabrikasi/2.0 (kisisel proje)"}
 
 
-def gemini_generate(prompt, models, search=False, json_mode=False, max_tokens=8192):
+def _gemini_client():
     from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    client = genai.Client(
+        api_key=os.environ["GEMINI_API_KEY"],
+        http_options=types.HttpOptions(timeout=GEMINI_TIMEOUT_MS),
+    )
+    return client, types
+
+
+def gemini_generate(prompt, models, search=False, json_mode=False, max_tokens=8192):
+    client, types = _gemini_client()
     last = None
     for m in models:
-        try:
-            cfg = {"max_output_tokens": max_tokens, "temperature": 0.8}
-            if search:
-                cfg["tools"] = [types.Tool(google_search=types.GoogleSearch())]
-            if json_mode:
-                cfg["response_mime_type"] = "application/json"
-            resp = client.models.generate_content(
-                model=m, contents=prompt, config=types.GenerateContentConfig(**cfg)
-            )
-            text = (resp.text or "").strip()
-            if text:
-                log(f"     (model: {m}{', web aramalı' if search else ''})")
-                return text
-            last = RuntimeError(f"{m} boş yanıt verdi")
-        except Exception as e:  # noqa: BLE001
-            last = e
-            log(f"     ! {m} çalışmadı: {str(e)[:160]}")
-    raise RuntimeError(f"Hiçbir Gemini modeli çalışmadı. Son hata: {last}")
+        for attempt in (1, 2):
+            try:
+                cfg = {"max_output_tokens": max_tokens, "temperature": 0.8}
+                if search:
+                    cfg["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+                if json_mode:
+                    cfg["response_mime_type"] = "application/json"
+                resp = client.models.generate_content(
+                    model=m, contents=prompt, config=types.GenerateContentConfig(**cfg)
+                )
+                text = (resp.text or "").strip()
+                if text:
+                    log(f"     (model: {m}{', web aramalı' if search else ''})")
+                    return text
+                last = RuntimeError(f"{m} boş yanıt verdi")
+                break
+            except Exception as e:  # noqa: BLE001
+                last = e
+                msg = str(e)
+                log(f"     ! {m} çalışmadı: {msg[:160]}")
+                busy = any(k in msg for k in ("503", "429", "UNAVAILABLE", "timed out", "Timeout", "timeout"))
+                if busy and attempt == 1:
+                    time.sleep(8)
+                    continue
+                break
+    raise RuntimeError(f"Hiçbir Gemini modeli çalışmadı. Son hata: {str(last)[:200]}")
 
 
 def wiki_context(topic, per_lang_chars=3500):
@@ -188,14 +233,14 @@ def parse_json(text):
 
 
 def write_script(topic, notes):
-    n = max(6, round(TARGET_SECONDS / 5))
+    n = max(5, round(TARGET_SECONDS / 5.5))
     prompt = (
         SCRIPT_PROMPT.replace("{topic}", topic)
         .replace("{dil}", VIDEO_DILI)
-        .replace("{kelime}", str(int(TARGET_SECONDS * 2.4)))
+        .replace("{kelime}", str(int(TARGET_SECONDS * 2.3)))
         .replace("{sure}", str(TARGET_SECONDS))
         .replace("{n_min}", str(n - 1))
-        .replace("{n_max}", str(n + 2))
+        .replace("{n_max}", str(n + 1))
         .replace("{notes}", notes)
     )
     text = gemini_generate(prompt, SCRIPT_MODELS, json_mode=True, max_tokens=8192)
@@ -206,21 +251,51 @@ def write_script(topic, notes):
     for s in scenes:
         if not s.get("narration") or not s.get("image_prompt"):
             raise ValueError("Bir sahnede anlatım veya görsel tarifi yok")
+        s.setdefault("motion_prompt", "slow cinematic push-in, subtle natural movement")
+        s.setdefault("sound", "subtle ambient atmosphere")
     data["title"] = (data.get("title") or topic)[:95]
     return data
 
 
 # ----------------------------------------------------------------------------
-# 2) GÖRSELLER (Cloudflare Workers AI - FLUX schnell, ücretsiz kota)
+# 2) ANA KARELER (fal.ai - FLUX) ve 3) HAREKETLİ KLİPLER (fal.ai - Boreal)
 # ----------------------------------------------------------------------------
-def make_image(prompt, path):
+def _download(url, path, min_bytes):
+    import requests
+
+    data = requests.get(url, timeout=300).content
+    if len(data) < min_bytes:
+        raise RuntimeError(f"İndirilen dosya çok küçük/bozuk ({len(data)} bayt)")
+    Path(path).write_bytes(data)
+
+
+def make_keyframe(prompt, path):
+    import fal_client
+
+    result = fal_client.subscribe(
+        FAL_IMAGE_MODEL,
+        arguments={
+            "prompt": prompt,
+            "image_size": {"width": 720, "height": 1280},  # ~1 megapiksel
+            "num_images": 1,
+            "enable_safety_checker": True,
+            "output_format": "jpeg",
+        },
+    )
+    flags = result.get("has_nsfw_concepts") or []
+    if flags and flags[0]:
+        raise RuntimeError("Güvenlik filtresi görseli engelledi, yeniden denenecek")
+    _download(result["images"][0]["url"], path, 5000)
+
+
+def make_keyframe_cloudflare(prompt, path):
     import requests
 
     acc, tok = os.environ["CF_ACCOUNT_ID"], os.environ["CF_API_TOKEN"]
     r = requests.post(
-        f"https://api.cloudflare.com/client/v4/accounts/{acc}/ai/run/{IMAGE_MODEL}",
+        f"https://api.cloudflare.com/client/v4/accounts/{acc}/ai/run/{CF_IMAGE_MODEL}",
         headers={"Authorization": f"Bearer {tok}"},
-        json={"prompt": prompt[:2000], "steps": IMAGE_STEPS},
+        json={"prompt": prompt[:2000], "steps": CF_STEPS},
         timeout=180,
     )
     if r.status_code != 200:
@@ -238,28 +313,125 @@ def make_image(prompt, path):
     Path(path).write_bytes(data)
 
 
+def pick_image_engine():
+    eng = IMAGE_ENGINE
+    if eng == "auto":
+        eng = "fal" if os.environ.get("FAL_KEY") else "cloudflare"
+    return eng
+
+
+def motion_text(style, scene):
+    return (
+        f"[VISUAL]\n{style}. {scene['motion_prompt'].strip()} "
+        "Photorealistic, natural lifelike movement, cinematic lighting, smooth camera motion.\n\n"
+        "[SPEECH]\nNone. Nobody speaks.\n\n"
+        f"[SOUNDS]\n{scene['sound'].strip()}. No music, no voices.\n\n"
+        "[TEXT]\nNone."
+    )
+
+
+def make_motion(image_path, prompt, duration, out_path):
+    import fal_client
+
+    image_url = fal_client.upload_file(str(image_path))
+    result = fal_client.subscribe(
+        VIDEO_MODEL,
+        arguments={
+            "prompt": prompt,
+            "image_url": image_url,
+            "resolution": VIDEO_RES,
+            "aspect_ratio": "9:16",
+            "duration": duration,
+            "negative_prompt": NEGATIVE,
+            "enable_safety_checker": True,
+        },
+    )
+    _download(result["video"]["url"], out_path, 20000)
+
+
 # ----------------------------------------------------------------------------
-# 3) SESLENDİRME - kelime zamanlamalarıyla
-#    Varsayılan: edge-tts (ücretsiz). Yedek: gTTS. İsteğe bağlı: ElevenLabs.
+# 4) SESLENDİRME - motorlar sırayla denenir, tek videoda tek ses kullanılır
 # ----------------------------------------------------------------------------
-_state = {"engine": TTS_ENGINE}
+def audio_duration(path):
+    r = run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(path)])
+    return float(r.stdout.strip())
 
 
 def estimate_words(text, total):
-    """Kelime zamanları gelmezse, konuşma süresine orantılı tahmin."""
+    """Kelime zamanları gelmezse, konuşma süresine orantılı tahmin (noktalama duraklamalı)."""
     ws = text.split()
     if not ws:
         return []
-    lens = [len(w) + 1 for w in ws]
-    tot, t, avail, out = sum(lens), 0.05, max(total - 0.1, 0.5), []
-    for w, ln in zip(ws, lens):
-        d = avail * ln / tot
+    weights = []
+    for w in ws:
+        wt = len(w) + 1
+        if re.search(r"[.!?…]$", w):
+            wt += 6
+        elif re.search(r"[,;:]$", w):
+            wt += 3
+        weights.append(wt)
+    tot, t, avail, out = sum(weights), 0.03, max(total - 0.06, 0.5), []
+    for w, wt in zip(ws, weights):
+        d = avail * wt / tot
         out.append((w, t, t + d))
         t += d
     return out
 
 
-def make_voice_edge(text, mp3_path):
+def _pcm_to_mp3(pcm, rate, mp3_path):
+    raw = Path(str(mp3_path) + ".pcm")
+    raw.write_bytes(pcm)
+    trim = (
+        "silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.05,"
+        "areverse,silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.05,areverse"
+    )
+    run(
+        ["ffmpeg", "-y", "-f", "s16le", "-ar", str(rate), "-ac", "1", "-i", str(raw),
+         "-af", trim, "-ar", "44100", "-c:a", "libmp3lame", "-b:a", "192k", str(mp3_path)]
+    )
+    raw.unlink(missing_ok=True)
+
+
+def make_voice_gemini(text, mp3_path, prev_text="", next_text=""):
+    client, types = _gemini_client()
+    last = None
+    for attempt in (1, 2, 3):
+        try:
+            resp = client.models.generate_content(
+                model=GEMINI_TTS_MODEL,
+                contents=f"{GEMINI_TTS_STYLE}: {text}",
+                config=types.GenerateContentConfig(
+                    response_modalities=["AUDIO"],
+                    speech_config=types.SpeechConfig(
+                        voice_config=types.VoiceConfig(
+                            prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=GEMINI_VOICE)
+                        )
+                    ),
+                ),
+            )
+            part = resp.candidates[0].content.parts[0]
+            data = part.inline_data.data
+            if isinstance(data, str):
+                data = base64.b64decode(data)
+            mime = getattr(part.inline_data, "mime_type", "") or ""
+            m = re.search(r"rate=(\d+)", mime)
+            rate = int(m.group(1)) if m else 24000
+            if len(data) < 2000:
+                raise RuntimeError("Gemini TTS ses döndürmedi")
+            _pcm_to_mp3(data, rate, mp3_path)
+            return estimate_words(text, audio_duration(mp3_path))
+        except Exception as e:  # noqa: BLE001
+            last = e
+            msg = str(e)
+            if attempt < 3 and any(k in msg for k in ("429", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE")):
+                log(f"     (Gemini TTS yoğun, {35} sn bekleniyor)")
+                time.sleep(35)
+                continue
+            break
+    raise RuntimeError(f"Gemini TTS: {str(last)[:200]}")
+
+
+def make_voice_edge(text, mp3_path, prev_text="", next_text=""):
     import asyncio
 
     import edge_tts
@@ -285,7 +457,7 @@ def make_voice_edge(text, mp3_path):
     return words or estimate_words(text, audio_duration(mp3_path))
 
 
-def make_voice_gtts(text, mp3_path):
+def make_voice_gtts(text, mp3_path, prev_text="", next_text=""):
     from gtts import gTTS
 
     gTTS(text, lang=GTTS_LANG).save(str(mp3_path))
@@ -294,9 +466,7 @@ def make_voice_gtts(text, mp3_path):
 
 def words_from_alignment(al):
     words, cur, ws, we = [], "", None, None
-    for c, s, e in zip(
-        al["characters"], al["character_start_times_seconds"], al["character_end_times_seconds"]
-    ):
+    for c, s, e in zip(al["characters"], al["character_start_times_seconds"], al["character_end_times_seconds"]):
         if c.isspace():
             if cur:
                 words.append((cur, ws, we))
@@ -311,7 +481,7 @@ def words_from_alignment(al):
     return words
 
 
-def make_voice_eleven(text, mp3_path, prev_text="", next_text=""):
+def make_voice_elevenlabs(text, mp3_path, prev_text="", next_text=""):
     import requests
 
     url = (
@@ -341,60 +511,91 @@ def make_voice_eleven(text, mp3_path, prev_text="", next_text=""):
     return words_from_alignment(j["alignment"])
 
 
-def choose_voice_engine(work):
-    """Videonun tamamı aynı sesle çıksın diye motoru en başta yoklar."""
-    if _state["engine"] == "elevenlabs":
-        return
-    try:
-        make_voice_edge("Merhaba, bu bir deneme.", Path(work) / "probe.mp3")
-        _state["engine"] = "edge"
-    except Exception as e:  # noqa: BLE001
-        log(f"     ! edge-tts çalışmadı ({str(e)[:140]}). Yedek ses (gTTS) kullanılacak.")
-        _state["engine"] = "gtts"
-    log(f"     ses motoru: {_state['engine']}")
+VOICE_FUNCS = {
+    "gemini": make_voice_gemini,
+    "edge": make_voice_edge,
+    "gtts": make_voice_gtts,
+    "elevenlabs": make_voice_elevenlabs,
+}
 
 
-def make_voice(text, mp3_path, prev_text="", next_text=""):
-    eng = _state["engine"]
-    if eng == "elevenlabs":
-        return make_voice_eleven(text, mp3_path, prev_text, next_text)
-    if eng == "gtts":
-        return make_voice_gtts(text, mp3_path)
-    return make_voice_edge(text, mp3_path)
+def synthesize_all(scenes, work):
+    """Her motoru sırayla dener; tüm sahneler aynı motorla üretilir (ses tutarlı olsun diye)."""
+    last = None
+    for eng in TTS_ENGINES:
+        fn = VOICE_FUNCS.get(eng)
+        if not fn:
+            continue
+        if eng == "elevenlabs" and not os.environ.get("ELEVENLABS_API_KEY"):
+            continue
+        try:
+            log(f"     ses motoru: {eng}")
+            results = []
+            for i, s in enumerate(scenes):
+                mp3 = Path(work) / f"voice_{i:03d}.mp3"
+                prev_t = scenes[i - 1]["narration"] if i > 0 else ""
+                next_t = scenes[i + 1]["narration"] if i < len(scenes) - 1 else ""
+                words = retry(lambda: fn(s["narration"], mp3, prev_t, next_t), f"ses {i + 1}", tries=2, wait=4)
+                results.append((mp3, words))
+                log(f"     ses {i + 1}/{len(scenes)} hazır")
+            return results
+        except Exception as e:  # noqa: BLE001
+            last = e
+            log(f"     ! '{eng}' ses motoru çalışmadı ({str(e)[:140]}), sıradaki deneniyor")
+    raise RuntimeError(f"Hiçbir ses motoru çalışmadı. Son hata: {str(last)[:200]}")
 
 
 # ----------------------------------------------------------------------------
-# 4) MONTAJ (FFmpeg)
+# 5) MONTAJ (FFmpeg)
 # ----------------------------------------------------------------------------
-def audio_duration(path):
-    r = run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(path)]
-    )
-    return float(r.stdout.strip())
-
-
 def make_clip(image, frames, idx, out):
-    """Duran görsele sinematik kamera hareketi (yavaş zoom / kaydırma) verir."""
+    """Yedek: hareketli klip üretilemezse duran görsele kamera hareketi verir."""
     d = frames
     variants = [
-        ("1+0.18*on/{d}", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"),  # yavaş yakınlaş
-        ("1.18-0.18*on/{d}", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"),  # yavaş uzaklaş
-        ("1.2", "(iw-iw/zoom)*on/{d}", "ih/2-(ih/zoom/2)"),  # soldan sağa
-        ("1.2", "(iw-iw/zoom)*(1-on/{d})", "ih/2-(ih/zoom/2)"),  # sağdan sola
+        ("1+0.18*on/{d}", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"),
+        ("1.18-0.18*on/{d}", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"),
+        ("1.2", "(iw-iw/zoom)*on/{d}", "ih/2-(ih/zoom/2)"),
+        ("1.2", "(iw-iw/zoom)*(1-on/{d})", "ih/2-(ih/zoom/2)"),
     ]
     z, x, y = [v.replace("{d}", str(d)) for v in variants[idx % len(variants)]]
     vf = (
         f"scale={W*2}:{H*2}:force_original_aspect_ratio=increase:flags=lanczos,"
         f"crop={W*2}:{H*2},"
         f"zoompan=z='{z}':x='{x}':y='{y}':d={d}:s={W}x{H}:fps={FPS},"
+        "eq=contrast=1.06:saturation=1.12,vignette=PI/5,noise=alls=6:allf=t+u,"
         "format=yuv420p"
     )
     run(
-        [
-            "ffmpeg", "-y", "-i", str(image), "-vf", vf, "-frames:v", str(d),
-            "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-r", str(FPS), str(out),
-        ]
+        ["ffmpeg", "-y", "-i", str(image), "-vf", vf, "-frames:v", str(d),
+         "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-r", str(FPS), str(out)]
     )
+
+
+def norm_clip(src, frames, out):
+    """Yapay zekâ klibini 1080x1920 / 30 fps'e getirir; kısa kalırsa son kareyi uzatır."""
+    vf = (
+        f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{H},setsar=1,"
+        f"fps={FPS},tpad=stop_mode=clone:stop_duration=4,unsharp=3:3:0.4,format=yuv420p"
+    )
+    run(
+        ["ffmpeg", "-y", "-i", str(src), "-vf", vf, "-an", "-frames:v", str(frames),
+         "-c:v", "libx264", "-preset", "medium", "-crf", "19", "-r", str(FPS), str(out)]
+    )
+
+
+def has_audio(path):
+    r = run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", str(path)])
+    return bool(r.stdout.strip())
+
+
+def ambience(src, seg, out):
+    """Klibin kendi ses efektini (rüzgâr, adım sesi vb.) kısık seviyede alır."""
+    if src and has_audio(src):
+        fade_out = max(seg - 0.3, 0)
+        af = f"volume={AMBIENCE_VOLUME},afade=t=in:d=0.15,afade=t=out:st={fade_out:.3f}:d=0.3,apad"
+        run(["ffmpeg", "-y", "-i", str(src), "-vn", "-ac", "2", "-ar", "44100", "-af", af, "-t", f"{seg:.4f}", str(out)])
+    else:
+        run(["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-t", f"{seg:.4f}", str(out)])
 
 
 def caption_events(words, offset, max_words=3):
@@ -407,9 +608,7 @@ def caption_events(words, offset, max_words=3):
 
     for w in words:
         chunk.append(w)
-        if len(chunk) >= max_words or re.search(r"[.!?…:;]$", w[0]) or (
-            len(chunk) >= 2 and w[0].endswith(",")
-        ):
+        if len(chunk) >= max_words or re.search(r"[.!?…:;]$", w[0]) or (len(chunk) >= 2 and w[0].endswith(",")):
             flush()
     flush()
     for i in range(len(events) - 1):
@@ -447,7 +646,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 
 def assemble(items, work, out_path, music=None):
-    """items: [{'image': Path, 'audio': Path, 'words': [(kelime, bas, bit), ...]}, ...]"""
+    """items: [{'image': Path, 'clip': Path|None, 'audio': Path, 'words': [(kelime, bas, bit)]}, ...]"""
     work = Path(work).resolve()
     out_path = Path(out_path).resolve()
     t, events = 0.0, []
@@ -455,40 +654,50 @@ def assemble(items, work, out_path, music=None):
         dur = audio_duration(it["audio"])
         frames = int(round((dur + PAD) * FPS))
         seg = frames / FPS
-        log(f"  sahne {i + 1}/{len(items)}: {seg:.1f} sn")
-        make_clip(it["image"], frames, i, work / f"clip_{i:03d}.mp4")
+        log(f"  sahne {i + 1}/{len(items)}: {seg:.1f} sn {'(hareketli klip)' if it.get('clip') else '(yedek: kamera hareketi)'}")
+        clip_out = work / f"clip_{i:03d}.mp4"
+        if it.get("clip"):
+            norm_clip(it["clip"], frames, clip_out)
+        else:
+            make_clip(it["image"], frames, i, clip_out)
+        ambience(it.get("clip"), seg, work / f"amb_{i:03d}.wav")
         run(
-            [
-                "ffmpeg", "-y", "-i", str(it["audio"]), "-af", "apad", "-ar", "44100", "-ac", "2",
-                "-t", f"{seg:.4f}", str(work / f"nar_{i:03d}.wav"),
-            ]
+            ["ffmpeg", "-y", "-i", str(it["audio"]), "-af", "apad", "-ar", "44100", "-ac", "2",
+             "-t", f"{seg:.4f}", str(work / f"nar_{i:03d}.wav")]
         )
         events += caption_events(it["words"], t)
         t += seg
     total = t
 
-    (work / "clips.txt").write_text("".join(f"file 'clip_{i:03d}.mp4'\n" for i in range(len(items))))
-    (work / "nars.txt").write_text("".join(f"file 'nar_{i:03d}.wav'\n" for i in range(len(items))))
+    n = len(items)
+    (work / "clips.txt").write_text("".join(f"file 'clip_{i:03d}.mp4'\n" for i in range(n)))
+    (work / "nars.txt").write_text("".join(f"file 'nar_{i:03d}.wav'\n" for i in range(n)))
+    (work / "ambs.txt").write_text("".join(f"file 'amb_{i:03d}.wav'\n" for i in range(n)))
     run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "clips.txt", "-c", "copy", "video_raw.mp4"], cwd=work)
     run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "nars.txt", "-c", "copy", "narration.wav"], cwd=work)
+    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "ambs.txt", "-c", "copy", "ambience.wav"], cwd=work)
     write_ass(events, work / "subs.ass")
 
-    cmd = ["ffmpeg", "-y", "-i", "video_raw.mp4", "-i", "narration.wav"]
+    cmd = ["ffmpeg", "-y", "-i", "video_raw.mp4", "-i", "narration.wav", "-i", "ambience.wav"]
+    fc = (
+        "[0:v]ass=subs.ass[v];"
+        "[1:a][2:a]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[nm];"
+    )
     if music:
         cmd += ["-stream_loop", "-1", "-i", str(Path(music).resolve())]
         fade_out_at = max(total - 2.5, 0)
-        fc = (
-            "[0:v]ass=subs.ass[v];"
-            f"[2:a]atrim=0:{total:.3f},asetpts=PTS-STARTPTS,volume=0.10,"
+        fc += (
+            f"[3:a]atrim=0:{total:.3f},asetpts=PTS-STARTPTS,volume=0.10,"
             f"afade=t=in:d=1.5,afade=t=out:st={fade_out_at:.3f}:d=2.5[m];"
-            "[1:a][m]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]"
+            "[nm][m]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mix];"
         )
     else:
-        fc = "[0:v]ass=subs.ass[v];[1:a]anull[a]"
+        fc += "[nm]anull[mix];"
+    fc += "[mix]loudnorm=I=-16:TP=-1.5:LRA=11[a]"
     cmd += [
         "-filter_complex", fc, "-map", "[v]", "-map", "[a]",
         "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-t", f"{total:.3f}",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-movflags", "+faststart", "-t", f"{total:.3f}",
         str(out_path),
     ]
     run(cmd, cwd=work)
@@ -503,60 +712,99 @@ def main():
     ap.add_argument("--topic", required=True, help="Video konusu")
     topic = ap.parse_args().topic.strip()
 
-    need = ["GEMINI_API_KEY", "CF_ACCOUNT_ID", "CF_API_TOKEN"]
-    if TTS_ENGINE == "elevenlabs":
-        need.append("ELEVENLABS_API_KEY")
-    for k in need:
-        if not os.environ.get(k):
-            sys.exit(f"HATA: {k} bulunamadı. GitHub > Settings > Secrets and variables > Actions bölümüne ekle.")
+    if not os.environ.get("GEMINI_API_KEY"):
+        sys.exit("HATA: GEMINI_API_KEY bulunamadı. GitHub > Settings > Secrets and variables > Actions bölümüne ekle.")
+    image_engine = pick_image_engine()
+    if image_engine == "fal" and not os.environ.get("FAL_KEY"):
+        sys.exit("HATA: FAL_KEY bulunamadı.")
+    if image_engine == "cloudflare" and not (os.environ.get("CF_ACCOUNT_ID") and os.environ.get("CF_API_TOKEN")):
+        sys.exit("HATA: CF_ACCOUNT_ID ve CF_API_TOKEN secret'ları bulunamadı (ücretsiz görsel için gerekli).")
+    motion_on = MOTION != "off" and bool(os.environ.get("FAL_KEY"))
 
     out, work = Path("output"), Path("work")
     out.mkdir(exist_ok=True)
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir()
 
-    log(f"Konu: {topic}")
-    log("1/5  Araştırma yapılıyor...")
-    notes = retry(lambda: research(topic), "araştırma")
+    log(f"Konu: {topic}  |  hedef süre: {TARGET_SECONDS} sn")
+    log(f"Mod: görsel={image_engine}, hareketli klip={'AÇIK (ücretli)' if motion_on else 'KAPALI (ücretsiz mod)'}")
+    log("1/6  Araştırma yapılıyor...")
+    notes = retry(lambda: research(topic), "araştırma", tries=2)
     (out / "research.md").write_text(notes, encoding="utf-8")
 
-    log("2/5  Senaryo yazılıyor...")
-    script = retry(lambda: write_script(topic, notes), "senaryo")
+    log("2/6  Senaryo yazılıyor...")
+    script = retry(lambda: write_script(topic, notes), "senaryo", tries=3)
     (out / "script.json").write_text(json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8")
     scenes = script["scenes"]
     log(f"     Başlık: {script['title']}  |  {len(scenes)} sahne")
 
-    log("3/5  Görseller üretiliyor...")
+    log("3/6  Ana kareler üretiliyor...")
     style = script["style"].strip().rstrip(".")
+    center = (
+        " Main subject centered in the frame, simple uncluttered background on both sides."
+        if image_engine == "cloudflare" else ""
+    )
     prompts = [
-        f"{style}. {s['image_prompt'].strip()} Main subject centered in the frame, simple uncluttered "
-        "background on both sides, cinematic, highly detailed, no text, no letters, no watermark."
+        f"{style}. {s['image_prompt'].strip()}{center} Vertical 9:16 composition, photorealistic cinematic film still, "
+        "highly detailed, natural lighting, no text, no letters, no watermark."
         for s in scenes
     ]
+    keyframe_fn = make_keyframe if image_engine == "fal" else make_keyframe_cloudflare
     img_paths = [work / f"img_{i:03d}.jpg" for i in range(len(scenes))]
 
     def do_image(i):
-        retry(lambda: make_image(prompts[i], img_paths[i]), f"görsel {i + 1}")
-        log(f"     görsel {i + 1}/{len(scenes)} hazır")
+        retry(lambda: keyframe_fn(prompts[i], img_paths[i]), f"görsel {i + 1}")
+        log(f"     ana kare {i + 1}/{len(scenes)} hazır")
 
     with ThreadPoolExecutor(max_workers=3) as ex:
         list(ex.map(do_image, range(len(scenes))))
 
-    log("4/5  Seslendirme yapılıyor...")
-    choose_voice_engine(work)
-    items = []
-    for i, s in enumerate(scenes):
-        mp3 = work / f"voice_{i:03d}.mp3"
-        prev_t = scenes[i - 1]["narration"] if i > 0 else ""
-        next_t = scenes[i + 1]["narration"] if i < len(scenes) - 1 else ""
-        words = retry(lambda: make_voice(s["narration"], mp3, prev_t, next_t), f"ses {i + 1}")
-        items.append({"image": img_paths[i], "audio": mp3, "words": words})
-        log(f"     ses {i + 1}/{len(scenes)} hazır")
+    log("4/6  Seslendirme yapılıyor...")
+    voices = synthesize_all(scenes, work)
 
-    log("5/5  Montaj yapılıyor...")
+    clip_paths = [work / f"motion_{i:03d}.mp4" for i in range(len(scenes))]
+    ok = [False] * len(scenes)
+    if motion_on:
+        log("5/6  Hareketli klipler üretiliyor (bu adım birkaç dakika sürer)...")
+        durations = []
+        for mp3, _ in voices:
+            durations.append(int(min(20, max(3, math.ceil(audio_duration(mp3) + PAD)))))
+        est = len(scenes) * (0.025 if image_engine == "fal" else 0) + sum(durations) * 0.01
+        log(f"     tahmini fal.ai maliyeti: yaklaşık ${est:.2f}")
+
+        def do_motion(i):
+            try:
+                prompt = motion_text(style, scenes[i])
+                retry(lambda: make_motion(img_paths[i], prompt, durations[i], clip_paths[i]), f"klip {i + 1}", tries=3, wait=10)
+                ok[i] = True
+                log(f"     klip {i + 1}/{len(scenes)} hazır")
+            except Exception as e:  # noqa: BLE001
+                log(f"     ! klip {i + 1} üretilemedi, yedek kamera hareketi kullanılacak: {str(e)[:200]}")
+
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            list(ex.map(do_motion, range(len(scenes))))
+
+        if ok.count(False) > len(scenes) / 2:
+            sys.exit(
+                "HATA: Hareketli kliplerin çoğu üretilemedi. fal.ai bakiyeni (fal.ai/dashboard/billing) ve "
+                "yukarıdaki hata satırlarını kontrol et. Slayt gibi video yayınlamamak için işlem durduruldu."
+            )
+    else:
+        log("5/6  Hareketli klip atlandı (ücretsiz mod: sinematik kamera hareketi kullanılacak)")
+
+    log("6/6  Montaj yapılıyor...")
     tracks = glob.glob("assets/music/*.mp3")
     music = random.choice(tracks) if tracks else None
     log(f"     müzik: {music or 'yok (assets/music klasörüne .mp3 eklenebilir)'}")
+    items = [
+        {
+            "image": img_paths[i],
+            "clip": clip_paths[i] if ok[i] else None,
+            "audio": voices[i][0],
+            "words": voices[i][1],
+        }
+        for i in range(len(scenes))
+    ]
     total = assemble(items, work, out / "video.mp4", music)
 
     shutil.copy(img_paths[0], out / "thumbnail.jpg")
@@ -566,10 +814,12 @@ def main():
         "description": script.get("description", ""),
         "tags": script.get("tags", []),
         "duration_seconds": round(total, 1),
+        "motion_clips": f"{sum(ok)}/{len(scenes)}",
     }
     (out / "metadata.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    log(f"BİTTİ: output/video.mp4  ({total:.0f} sn)")
+    log(f"BİTTİ: output/video.mp4  ({total:.0f} sn, hareketli klip: {meta['motion_clips']})")
 
 
 if __name__ == "__main__":
     main()
+
