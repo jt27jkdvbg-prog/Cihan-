@@ -7,6 +7,11 @@ on:
         description: "Video konusu / başlığı"
         required: true
         type: string
+      sure:
+        description: "Hedef süre (saniye)"
+        required: false
+        default: "45"
+        type: string
 
 permissions:
   contents: write
@@ -14,7 +19,7 @@ permissions:
 jobs:
   video:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -32,10 +37,14 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Videoyu üret
+        timeout-minutes: 40
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          FAL_KEY: ${{ secrets.FAL_KEY }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          TARGET_SECONDS: ${{ inputs.sure }}
           KONU: ${{ inputs.konu }}
         run: python generate.py --topic "$KONU"
 
@@ -48,3 +57,4 @@ jobs:
           gh release create "video-${{ github.run_number }}" \
             output/video.mp4 output/metadata.json output/thumbnail.jpg output/script.json \
             --title "$TITLE" --notes "Konu: $KONU"
+
