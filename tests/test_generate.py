@@ -21,7 +21,7 @@ class TestVideoPipeline(unittest.TestCase):
             "Merhaba dünya. Bu bir test!",
             3.0
         )
-        self.assertEqual(len(words), 6)
+        self.assertEqual(len(words), 5)
         self.assertGreater(words[0][2], words[0][1])
         self.assertLessEqual(words[-1][2], 3.0)
 
