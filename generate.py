@@ -878,14 +878,15 @@ def main():
     music = random.choice(tracks) if tracks else None
     log(f"     müzik: {music or 'yok (assets/music klasörüne .mp3 eklenebilir)'}")
     items = [
-        {
-            "image": img_paths[i],
-            "clip": clip_paths[i] if ok[i] else None,
-            "audio": voices[i][0],
-            "words": voices[i][1],
-        }
-        for i in range(len(scenes))
-    ]
+    {
+        "image": img_paths[i],
+        "clip": clip_paths[i] if ok[i] else None,
+        "audio": voices[i][0],
+        "words": voices[i][1],
+        "scene": scenes[i],
+    }
+    for i in range(len(scenes))
+]
     total = assemble(items, work, out / "video.mp4", music)
 
     shutil.copy(img_paths[0], out / "thumbnail.jpg")
