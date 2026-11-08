@@ -74,8 +74,9 @@ TARGET_SECONDS = int(_env("TARGET_SECONDS", "45"))
 VIDEO_DILI = _env("VIDEO_DILI", "Türkçe")
 
 NEGATIVE = (
-    "speech, talking, lip movement, subtitles, text, letters, watermark, logo, "
-    "distorted face, extra fingers, morphing, flicker"
+    "subtitles, text, letters, watermark, logo, "
+    "distorted face, extra fingers, morphing, flicker, "
+    "deformed hands, unnatural anatomy, duplicate people"
 )
 
 
@@ -343,15 +344,30 @@ def pick_image_engine():
 
 
 def motion_text(style, scene):
+    dialogue = str(scene.get("dialogue", "")).strip()
+
+    if dialogue:
+        speech_prompt = (
+            "The character visibly speaks naturally with realistic lip movement. "
+            f"Intended dialogue: {dialogue}. "
+            "Match facial expressions and mouth movement to the spoken line."
+        )
+    else:
+        speech_prompt = (
+            "No required dialogue. Use natural facial expressions "
+            "and realistic movement."
+        )
+
     return (
-        f"[VISUAL]\n{style}. {scene['motion_prompt'].strip()} "
-        "Photorealistic, natural lifelike movement, cinematic lighting, smooth camera motion.\n\n"
-        "[SPEECH]\nNone. Nobody speaks.\n\n"
-        f"[SOUNDS]\n{scene['sound'].strip()}. No music, no voices.\n\n"
-        "[TEXT]\nNone."
+        f"[VISUAL]\n{style}. "
+        f"{scene['motion_prompt'].strip()} "
+        "Photorealistic, natural lifelike movement, cinematic lighting, "
+        "smooth camera motion. Preserve character identity and clothing.\n\n"
+        f"[SPEECH]\n{speech_prompt}\n\n"
+        f"[SOUNDS]\n{scene['sound'].strip()}. "
+        "Natural environmental sound effects.\n\n"
+        "[TEXT]\nNo subtitles, captions, logos or written text."
     )
-
-
 def make_motion(image_path, prompt, duration, out_path):
     import fal_client
 
