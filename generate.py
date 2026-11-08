@@ -19,6 +19,8 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from cinematic_director import build_script_prompt, enrich_image_prompt, validate_script
+from quality_gate import require_real_motion, validate_motion_outputs
 
 # ----------------------------------------------------------------------------
 # AYARLAR (istersen GitHub'da "Variables" bölümünden değiştirebilirsin)
