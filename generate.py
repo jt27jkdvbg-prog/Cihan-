@@ -762,23 +762,23 @@ def main():
 
     log("3/6  Ana kareler üretiliyor...")
     style = script["style"].strip().rstrip(".")
-    center = (
+        center = (
         " Main subject centered in the frame, simple uncluttered background on both sides."
         if image_engine == "cloudflare" else ""
     )
-   prompts = [
-    (
-        enrich_image_prompt(
-            style,
-            script.get("character_bible", ""),
-            s
+
+    prompts = [
+        (
+            enrich_image_prompt(
+                style,
+                script.get("character_bible", ""),
+                s
+            )
+            + center
+            + " Vertical 9:16 composition, photorealistic cinematic film still, "
+            "highly detailed, natural lighting, no text, no letters, no watermark."
         )
-        + center
-        + " Vertical 9:16 composition, photorealistic cinematic film still, "
-        "highly detailed, natural lighting, no text, no letters, no watermark."
-    )
-    for s in scenes
-]
+        for s in scenes
     ]
     keyframe_fn = make_keyframe if image_engine == "fal" else make_keyframe_cloudflare
     img_paths = [work / f"img_{i:03d}.jpg" for i in range(len(scenes))]
