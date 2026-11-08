@@ -43,7 +43,7 @@ HINTS = {
         "genel plan", "kuş bakışı", "manzara",
     ),
     "tracking": (
-        "tracking", "follow", "chase", "running", "walking",
+    "tracking", "follow", "chase", "running", "runs", "run", "walking",
         "moving", "takip", "kovala", "koş", "yürü", "ilerle",
     ),
     "dramatic": (
