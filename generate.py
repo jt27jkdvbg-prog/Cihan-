@@ -597,7 +597,9 @@ def synthesize_all(scenes, work):
 
 # ----------------------------------------------------------------------------
 # 5) MONTAJ (FFmpeg)
-# ----------------------------------------------------------------------------def make_clip(image, frames, idx, out, scene=None):
+# ----------------------------------------------------------------------------
+
+def make_clip(image, frames, idx, out, scene=None):
     """Ücretsiz modda sahneye göre sinematik kamera hareketi uygular."""
     d = max(1, int(frames))
 
