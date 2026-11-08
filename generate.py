@@ -234,29 +234,49 @@ def parse_json(text):
     return json.loads(text[a : b + 1])
 
 
+
 def write_script(topic, notes):
-    n = max(5, round(TARGET_SECONDS / 5.5))
-    prompt = (
-        SCRIPT_PROMPT.replace("{topic}", topic)
-        .replace("{dil}", VIDEO_DILI)
-        .replace("{kelime}", str(int(TARGET_SECONDS * 2.3)))
-        .replace("{sure}", str(TARGET_SECONDS))
-        .replace("{n_min}", str(n - 1))
-        .replace("{n_max}", str(n + 1))
-        .replace("{notes}", notes)
+    prompt = build_script_prompt(
+        topic,
+        notes,
+        TARGET_SECONDS,
+        VIDEO_DILI
     )
-    text = gemini_generate(prompt, SCRIPT_MODELS, json_mode=True, max_tokens=8192)
-    data = parse_json(text)
-    scenes = data.get("scenes") or []
-    if len(scenes) < 3 or not data.get("style"):
-        raise ValueError("Senaryo eksik geldi")
-    for s in scenes:
-        if not s.get("narration") or not s.get("image_prompt"):
-            raise ValueError("Bir sahnede anlatım veya görsel tarifi yok")
-        s.setdefault("motion_prompt", "slow cinematic push-in, subtle natural movement")
-        s.setdefault("sound", "subtle ambient atmosphere")
+
+    raw = gemini_generate(
+        prompt,
+        SCRIPT_MODELS,
+        json_mode=True,
+        max_tokens=8192
+    )
+
+    data = parse_json(raw)
+
+    report = validate_script(data, TARGET_SECONDS)
+
+    if not report["valid"]:
+        raise ValueError(
+            "Senaryo kalite kontrolünden geçemedi: "
+            + "; ".join(report["errors"])
+        )
+
+    character_bible = data.get("character_bible", "")
+
+    for scene in data["scenes"]:
+        scene.setdefault(
+            "motion_prompt",
+            "The subject performs a natural physical action while the camera tracks smoothly."
+        )
+        scene.setdefault(
+            "sound",
+            "Subtle location ambience and realistic physical sound effects."
+        )
+
     data["title"] = (data.get("title") or topic)[:95]
+    data["quality_report"] = report
+
     return data
+
 
 
 # ----------------------------------------------------------------------------
