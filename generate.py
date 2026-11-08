@@ -19,7 +19,12 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from cinematic_director import build_script_prompt, enrich_image_prompt, validate_script
+from cinematic_director import (
+    build_script_prompt,
+    enrich_image_prompt,
+    resolve_visual_style,
+    validate_script,
+)
 from quality_gate import require_real_motion, validate_motion_outputs
 
 # ----------------------------------------------------------------------------
@@ -255,6 +260,8 @@ def write_script(topic, notes):
     )
 
     data = parse_json(raw)
+    data["style"] = resolve_visual_style(VISUAL_STYLE, CUSTOM_VISUAL_STYLE)
+    
 
     report = validate_script(data, TARGET_SECONDS)
 
