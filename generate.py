@@ -777,7 +777,7 @@ def main():
     log(f"     Başlık: {script['title']}  |  {len(scenes)} sahne")
 
     log("3/6  Ana kareler üretiliyor...")
-      style = script["style"].strip().rstrip(".")
+style = script["style"].strip().rstrip(".")
 
     center = (
         " Main subject centered in the frame, simple uncluttered background on both sides."
