@@ -766,10 +766,19 @@ def main():
         " Main subject centered in the frame, simple uncluttered background on both sides."
         if image_engine == "cloudflare" else ""
     )
-    prompts = [
-        f"{style}. {s['image_prompt'].strip()}{center} Vertical 9:16 composition, photorealistic cinematic film still, "
+   prompts = [
+    (
+        enrich_image_prompt(
+            style,
+            script.get("character_bible", ""),
+            s
+        )
+        + center
+        + " Vertical 9:16 composition, photorealistic cinematic film still, "
         "highly detailed, natural lighting, no text, no letters, no watermark."
-        for s in scenes
+    )
+    for s in scenes
+]
     ]
     keyframe_fn = make_keyframe if image_engine == "fal" else make_keyframe_cloudflare
     img_paths = [work / f"img_{i:03d}.jpg" for i in range(len(scenes))]
