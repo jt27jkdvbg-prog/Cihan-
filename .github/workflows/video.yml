@@ -1,3 +1,4 @@
+
 name: Video Üret
 
 on:
@@ -11,6 +12,24 @@ on:
         description: "Hedef süre (saniye)"
         required: false
         default: "45"
+        type: string
+      gorsel_tarzi:
+        description: "Videonun görsel tarzı"
+        required: true
+        default: "3d"
+        type: choice
+        options:
+          - "3d"
+          - "anime"
+          - "realistic"
+          - "2d"
+          - "game"
+          - "storybook"
+          - "comic"
+          - "custom"
+      ozel_tarz:
+        description: "Özel tarz seçtiysen açıklamasını yaz"
+        required: false
         type: string
 
 permissions:
@@ -45,6 +64,9 @@ jobs:
           FAL_KEY: ${{ secrets.FAL_KEY }}
           ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
           TARGET_SECONDS: ${{ inputs.sure }}
+          VIDEO_DILI: "Türkçe"
+          VISUAL_STYLE: ${{ inputs.gorsel_tarzi }}
+          CUSTOM_VISUAL_STYLE: ${{ inputs.ozel_tarz }}
           KONU: ${{ inputs.konu }}
         run: python generate.py --topic "$KONU"
 
@@ -57,4 +79,3 @@ jobs:
           gh release create "video-${{ github.run_number }}" \
             output/video.mp4 output/metadata.json output/thumbnail.jpg output/script.json \
             --title "$TITLE" --notes "Konu: $KONU"
-
