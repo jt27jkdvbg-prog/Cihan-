@@ -722,16 +722,16 @@ def assemble(items, work, out_path, music=None):
         seg = frames / FPS
         log(f"  sahne {i + 1}/{len(items)}: {seg:.1f} sn {'(hareketli klip)' if it.get('clip') else '(yedek: kamera hareketi)'}")
         clip_out = work / f"clip_{i:03d}.mp4"
-        if it.get("clip"):
+                if it.get("clip"):
             norm_clip(it["clip"], frames, clip_out)
         else:
             make_clip(
-        it["image"],
-        frames,
-        i,
-        clip_out,
-        scene=it.get("scene", {}),
-    )
+                it["image"],
+                frames,
+                i,
+                clip_out,
+                scene=it.get("scene", {}),
+            )
         run(
             ["ffmpeg", "-y", "-i", str(it["audio"]), "-af", "apad", "-ar", "44100", "-ac", "2",
              "-t", f"{seg:.4f}", str(work / f"nar_{i:03d}.wav")]
