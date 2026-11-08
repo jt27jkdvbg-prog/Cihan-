@@ -633,10 +633,7 @@ def make_clip(image, frames, idx, out, scene=None):
             str(out),
         ]
     )
-    run(
-        ["ffmpeg", "-y", "-i", str(image), "-vf", vf, "-frames:v", str(d),
-         "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-r", str(FPS), str(out)]
-    )
+    
 
 
 def norm_clip(src, frames, out):
