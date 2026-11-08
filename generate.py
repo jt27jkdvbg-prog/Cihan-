@@ -597,23 +597,39 @@ def synthesize_all(scenes, work):
 
 # ----------------------------------------------------------------------------
 # 5) MONTAJ (FFmpeg)
-# ----------------------------------------------------------------------------
-def make_clip(image, frames, idx, out):
-    """Yedek: hareketli klip üretilemezse duran görsele kamera hareketi verir."""
-    d = frames
-    variants = [
-        ("1+0.18*on/{d}", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"),
-        ("1.18-0.18*on/{d}", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"),
-        ("1.2", "(iw-iw/zoom)*on/{d}", "ih/2-(ih/zoom/2)"),
-        ("1.2", "(iw-iw/zoom)*(1-on/{d})", "ih/2-(ih/zoom/2)"),
-    ]
-    z, x, y = [v.replace("{d}", str(d)) for v in variants[idx % len(variants)]]
+# ----------------------------------------------------------------------------def make_clip(image, frames, idx, out, scene=None):
+    """Ücretsiz modda sahneye göre sinematik kamera hareketi uygular."""
+    d = max(1, int(frames))
+
+    camera_filter = build_zoompan_filter(
+        scene or {},
+        idx,
+        d,
+        W,
+        H,
+        FPS,
+    )
+
     vf = (
         f"scale={W*2}:{H*2}:force_original_aspect_ratio=increase:flags=lanczos,"
         f"crop={W*2}:{H*2},"
-        f"zoompan=z='{z}':x='{x}':y='{y}':d={d}:s={W}x{H}:fps={FPS},"
-        "eq=contrast=1.06:saturation=1.12,vignette=PI/5,noise=alls=6:allf=t+u,"
+        f"{camera_filter},"
+        "eq=contrast=1.06:saturation=1.12,"
+        "vignette=PI/5,noise=alls=6:allf=t+u,"
         "format=yuv420p"
+    )
+
+    run(
+        [
+            "ffmpeg", "-y", "-i", str(image),
+            "-vf", vf,
+            "-frames:v", str(d),
+            "-c:v", "libx264",
+            "-preset", "medium",
+            "-crf", "20",
+            "-r", str(FPS),
+            str(out),
+        ]
     )
     run(
         ["ffmpeg", "-y", "-i", str(image), "-vf", vf, "-frames:v", str(d),
