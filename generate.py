@@ -725,8 +725,13 @@ def assemble(items, work, out_path, music=None):
         if it.get("clip"):
             norm_clip(it["clip"], frames, clip_out)
         else:
-            make_clip(it["image"], frames, i, clip_out)
-        ambience(it.get("clip"), seg, work / f"amb_{i:03d}.wav")
+    make_clip(
+        it["image"],
+        frames,
+        i,
+        clip_out,
+        scene=it.get("scene", {}),
+    )
         run(
             ["ffmpeg", "-y", "-i", str(it["audio"]), "-af", "apad", "-ar", "44100", "-ac", "2",
              "-t", f"{seg:.4f}", str(work / f"nar_{i:03d}.wav")]
