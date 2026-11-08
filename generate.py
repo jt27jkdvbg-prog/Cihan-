@@ -26,6 +26,7 @@ from cinematic_director import (
     validate_script,
 )
 from quality_gate import require_real_motion, validate_motion_outputs
+from camera_director import build_zoompan_filter
 
 # ----------------------------------------------------------------------------
 # AYARLAR (istersen GitHub'da "Variables" bölümünden değiştirebilirsin)
