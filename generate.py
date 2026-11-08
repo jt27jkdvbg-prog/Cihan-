@@ -725,7 +725,7 @@ def assemble(items, work, out_path, music=None):
         if it.get("clip"):
             norm_clip(it["clip"], frames, clip_out)
         else:
-    make_clip(
+            make_clip(
         it["image"],
         frames,
         i,
