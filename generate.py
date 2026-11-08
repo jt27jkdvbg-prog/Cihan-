@@ -72,7 +72,8 @@ ELEVEN_VOICE = _env("ELEVEN_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")
 
 TARGET_SECONDS = int(_env("TARGET_SECONDS", "45"))
 VIDEO_DILI = _env("VIDEO_DILI", "Türkçe")
-
+VISUAL_STYLE = _env("VISUAL_STYLE", "3d")
+CUSTOM_VISUAL_STYLE = _env("CUSTOM_VISUAL_STYLE", "")
 NEGATIVE = (
     "subtitles, text, letters, watermark, logo, "
     "distorted face, extra fingers, morphing, flicker, "
@@ -241,7 +242,9 @@ def write_script(topic, notes):
         topic,
         notes,
         TARGET_SECONDS,
-        VIDEO_DILI
+        VIDEO_DILI,
+        VISUAL_STYLE,
+        CUSTOM_VISUAL_STYLE
     )
 
     raw = gemini_generate(
@@ -360,9 +363,10 @@ def motion_text(style, scene):
 
     return (
         f"[VISUAL]\n{style}. "
-        f"{scene['motion_prompt'].strip()} "
-        "Photorealistic, natural lifelike movement, cinematic lighting, "
-        "smooth camera motion. Preserve character identity and clothing.\n\n"
+        f"{scene['motion_prompt'].strip()} ""High-quality animated feature-film movement matching the selected "
+"visual style. Animate the character's body, face, clothing and "
+"environment with clear physical actions. Use smooth cinematic camera "
+"movement. Preserve character identity, proportions and clothing.\n\n"
         f"[SPEECH]\n{speech_prompt}\n\n"
         f"[SOUNDS]\n{scene['sound'].strip()}. "
         "Natural environmental sound effects.\n\n"
@@ -791,8 +795,9 @@ def main():
                 s
             )
             + center
-            + " Vertical 9:16 composition, photorealistic cinematic film still, "
-            "highly detailed, natural lighting, no text, no letters, no watermark."
+            + " Vertical 9:16 composition, premium cinematic animated film frame, "
+"highly detailed environment, consistent selected visual style, "
+"no text, no letters, no watermark."
         )
         for s in scenes
     ]
