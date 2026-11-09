@@ -1,36 +1,31 @@
 
-"""Visual style presets and cinematic script validation."""
+"""Cinematic script generation, character dialogue and validation."""
 
 STYLE_PRESETS = {
     "3d": (
-        "Premium stylized 3D animated feature-film aesthetic, "
-        "expressive original characters, detailed 3D environments, "
-        "cinematic global illumination, rich materials and smooth animation."
+        "Premium stylized 3D animated feature-film aesthetic, expressive "
+        "original characters, detailed environments, cinematic lighting "
+        "and fluid character animation."
     ),
     "anime": (
         "Original Japanese anime feature-film aesthetic, expressive "
-        "character animation, detailed backgrounds, dramatic composition, "
-        "beautiful cinematic lighting and fluid motion."
+        "character animation, detailed backgrounds and cinematic lighting."
     ),
     "realistic": (
         "High-end live-action cinematic realism, natural human movement, "
-        "detailed environments, realistic lighting, film-grade color."
+        "detailed environments and realistic lighting."
     ),
     "2d": (
-        "Premium hand-drawn 2D animation, expressive character poses, "
-        "beautiful layered backgrounds, fluid frame animation."
+        "Premium hand-drawn 2D animation, expressive poses and fluid motion."
     ),
     "game": (
-        "AAA video game cinematic, high-detail 3D characters and worlds, "
-        "dramatic lighting, premium real-time-rendered cutscene quality."
+        "AAA video game cinematic, detailed 3D characters and dramatic lighting."
     ),
     "storybook": (
-        "Beautiful animated storybook aesthetic, painterly environments, "
-        "rich colors, magical atmosphere and expressive characters."
+        "Animated storybook aesthetic, painterly environments and rich colors."
     ),
     "comic": (
-        "Cinematic graphic novel animation, dynamic compositions, "
-        "illustrated textures, dramatic shadows and fluid motion."
+        "Cinematic graphic novel animation, dynamic compositions and shadows."
     ),
 }
 
@@ -39,9 +34,7 @@ def resolve_visual_style(style="3d", custom_style=""):
     aliases = {
         "3d animasyon": "3d",
         "3d animation": "3d",
-        "anime": "anime",
         "gerçekçi sinema": "realistic",
-        "realistic": "realistic",
         "2d animasyon": "2d",
         "2d animation": "2d",
         "oyun sinematiği": "game",
@@ -54,9 +47,12 @@ def resolve_visual_style(style="3d", custom_style=""):
     key = aliases.get(key, key)
 
     if key == "custom":
-        return custom_style.strip() or STYLE_PRESETS["3d"]
+        return str(custom_style or "").strip() or STYLE_PRESETS["3d"]
 
-    return STYLE_PRESETS.get(key, str(style).strip() or STYLE_PRESETS["3d"])
+    return STYLE_PRESETS.get(
+        key,
+        str(style).strip() or STYLE_PRESETS["3d"],
+    )
 
 
 def build_script_prompt(
@@ -73,62 +69,124 @@ def build_script_prompt(
         seconds = 60
 
     scene_count = max(8, min(12, round(seconds / 6)))
-    style_description = resolve_visual_style(visual_style, custom_style)
+    style_description = resolve_visual_style(
+        visual_style, custom_style
+    )
 
     return f"""
-You are an expert film director, screenwriter and cinematographer.
+You are an award-winning film director, screenwriter,
+cinematographer and character performance director.
 
-Create a cinematic {language} short film about: {topic}
-Additional context: {notes or "Use relevant and reliable information."}
-Target duration: approximately {seconds} seconds.
-Create exactly {scene_count} scenes.
+Create an original cinematic short film in {language}.
 
-MANDATORY VISUAL STYLE:
+STORY TOPIC:
+{topic}
+
+ADDITIONAL CONTEXT:
+{notes or "Use an original, coherent story."}
+
+TARGET DURATION:
+Approximately {seconds} seconds.
+
+SCENE COUNT:
+Exactly {scene_count} scenes.
+
+VISUAL STYLE:
 {style_description}
 
-The selected visual style must remain consistent throughout the entire film.
-Do not switch to photographs, unrelated art styles or generic stock imagery.
+CHARACTER REQUIREMENTS:
+- Create between 2 and 8 recurring characters.
+- Choose the number of characters according to the story.
+- Give every character a unique stable ID.
+- Define age, appearance, hair, clothing, personality and voice style.
+- Preserve each character's identity in every scene.
+- Never randomly change faces, hairstyles or clothing.
+- Characters must have distinct motivations and personalities.
+- Do not make every character speak in the same way.
 
-Return ONLY valid JSON:
+DIALOGUE REQUIREMENTS:
+- This is a character-driven film, not a narrated slideshow.
+- Dialogue must be written as separate ordered turns.
+- Every dialogue turn must identify its speaker by character ID or name.
+- Characters must respond to what other characters actually say.
+- Include natural reactions, questions, disagreements and pauses.
+- Use more than two speakers when the story benefits from it.
+- Avoid repetitive exposition and artificial conversations.
+- Narration is optional and must not replace character interaction.
+- Do not invent dialogue for characters who are not present.
+
+SHOT REQUIREMENTS:
+- Plan visual shots for each scene.
+- Use wide shots to establish locations and group positions.
+- Use close-ups for important speaking characters.
+- Use reaction shots for listening characters.
+- Use over-the-shoulder shots during conversations.
+- Use tracking and dolly shots when characters move.
+- Specify which characters are visible in each shot.
+- Do not describe a static image as if it were real motion.
+
+Return ONLY valid JSON with this structure:
+
 {{
   "title": "Film title",
   "style": "{style_description}",
-  "character_bible": "Detailed fixed descriptions of recurring characters",
+  "character_bible": "Detailed continuity description",
+  "characters": [
+    {{
+      "id": "character_1",
+      "name": "Character name",
+      "description": "Fixed physical appearance and clothing",
+      "personality": "Personality and motivation",
+      "voice": "Distinct voice characteristics"
+    }}
+  ],
   "scenes": [
     {{
-      "narration": "Turkish narration",
-      "dialogue": "Optional spoken dialogue",
-      "visual_subject": "Exact visible subject",
-      "action": "What the subject physically does",
-      "location": "Specific environment",
+      "scene_id": "scene_01",
+      "narration": "",
+      "visual_subject": "Visible characters and subjects",
+      "action": "Specific physical actions",
+      "location": "Detailed location",
       "props": "Important objects",
       "camera": "Camera framing and movement",
-      "image_prompt": "Detailed first-frame visual description",
-      "motion_prompt": "Specific character and environment movement",
-      "sound": "Scene-specific ambience and sound effects",
-      "transition": "Transition to next scene"
+      "image_prompt": "Detailed first-frame visual prompt",
+      "motion_prompt": "Specific continuous physical movement",
+      "sound": "Ambience and physical sound effects",
+      "dialogue_turns": [
+        {{
+          "speaker": "character_1",
+          "text": "Dialogue in {language}",
+          "emotion": "concerned",
+          "delivery": "natural",
+          "listener_ids": ["character_2"]
+        }}
+      ],
+      "shot_plan": [
+        {{
+          "shot_type": "wide",
+          "visible_characters": ["character_1", "character_2"],
+          "focus_character": "character_1",
+          "camera": "Slow cinematic tracking shot",
+          "action": "Characters look toward each other"
+        }}
+      ],
+      "transition": "Transition description"
     }}
   ]
 }}
 
 PRODUCTION RULES:
-- Vertical 9:16 cinematic composition.
-- Strong opening hook and satisfying ending.
-- Clear beginning, development and conclusion.
-- Every image must directly illustrate its scene narration.
-- Never use unrelated decorative images or generic filler scenes.
-- Every scene must contain a visible subject and physical action.
-- Do not repeat the same composition in every scene.
-- Preserve recurring characters' faces, hair, clothing and proportions.
-- Describe recurring characters consistently using character_bible.
-- Use varied tracking, dolly, pan, tilt and cinematic camera shots.
-- Natural Turkish narration and dialogue.
-- Add scene-specific sound effects and ambience.
-- Keep important subjects inside the vertical frame.
+- Use vertical 9:16 composition.
+- Create a strong opening and satisfying conclusion.
+- Every scene must advance the story.
+- Every scene needs a visible subject and physical action.
+- Preserve character appearance and screen geography.
+- Use natural dialogue in {language}.
+- Use varied cinematic compositions.
+- Avoid repeated or generic filler scenes.
+- Do not use copyrighted existing characters.
 - Do not invent facts about real people or history.
-- Use original character designs; do not copy existing franchises.
-
-Return only valid JSON. Do not include Markdown.
+- Return valid JSON only, without Markdown.
 """.strip()
 
 
@@ -137,16 +195,19 @@ def enrich_image_prompt(style, character_bible, scene):
 
     parts = [
         f"Mandatory visual style: {style_description}.",
-        f"Character continuity: {character_bible}." if character_bible else "",
+        (
+            f"Character continuity: {character_bible}."
+            if character_bible else ""
+        ),
         f"Visible subject: {scene.get('visual_subject', '')}.",
         f"Physical action: {scene.get('action', '')}.",
         f"Location: {scene.get('location', '')}.",
         f"Props: {scene.get('props', '')}.",
         f"Camera: {scene.get('camera', '')}.",
-        scene.get("image_prompt", ""),
-        "Vertical 9:16 composition.",
-        "Preserve recurring characters' faces, clothing and identity.",
-        "No text, letters, subtitles, logos or watermarks.",
+        str(scene.get("image_prompt", "")),
+        "Vertical 9:16 cinematic composition.",
+        "Preserve recurring characters' faces and clothing.",
+        "No text, subtitles, logos or watermarks.",
     ]
 
     return " ".join(str(part) for part in parts if part)
@@ -178,17 +239,85 @@ def validate_script(data, target_seconds=60):
     if not 8 <= len(scenes) <= 12:
         warnings.append("Expected between 8 and 12 scenes.")
 
+    characters = data.get("characters")
+    character_ids = set()
+    new_format = characters is not None
+
+    if new_format:
+        if not isinstance(characters, list) or not 2 <= len(characters) <= 8:
+            errors.append("Cast must contain between 2 and 8 characters.")
+        else:
+            for character in characters:
+                if not isinstance(character, dict):
+                    errors.append("Invalid character entry.")
+                    continue
+
+                character_id = str(character.get("id", "")).strip()
+                name = str(character.get("name", "")).strip()
+
+                if not character_id or not name:
+                    errors.append("Every character needs an ID and name.")
+                    continue
+
+                if character_id in character_ids:
+                    errors.append(
+                        f"Duplicate character ID: {character_id}"
+                    )
+
+                character_ids.add(character_id)
+
     image_prompts = []
+    narration_parts = []
+    total_dialogue_turns = 0
 
     for number, scene in enumerate(scenes, 1):
         if not isinstance(scene, dict):
             errors.append(f"Scene {number} is invalid.")
             continue
 
-        for field in ("narration", "image_prompt", "motion_prompt", "sound"):
-            value = str(scene.get(field, "")).strip()
-            if not value:
+        narration = str(scene.get("narration", "")).strip()
+        narration_parts.append(narration)
+
+        for field in ("image_prompt", "motion_prompt", "sound"):
+            if not str(scene.get(field, "")).strip():
                 errors.append(f"Scene {number}: missing {field}.")
+
+        turns = scene.get("dialogue_turns", [])
+
+        if new_format:
+            if not isinstance(turns, list):
+                errors.append(
+                    f"Scene {number}: dialogue_turns must be a list."
+                )
+                turns = []
+
+            if not narration and not turns:
+                errors.append(
+                    f"Scene {number}: needs narration or dialogue."
+                )
+
+            for turn_number, turn in enumerate(turns, 1):
+                if not isinstance(turn, dict):
+                    errors.append(
+                        f"Scene {number}: invalid dialogue turn."
+                    )
+                    continue
+
+                speaker = str(turn.get("speaker", "")).strip()
+                dialogue_text = str(turn.get("text", "")).strip()
+
+                if speaker not in character_ids:
+                    errors.append(
+                        f"Scene {number}, turn {turn_number}: "
+                        f"unknown speaker {speaker}."
+                    )
+
+                if not dialogue_text:
+                    errors.append(
+                        f"Scene {number}, turn {turn_number}: empty text."
+                    )
+
+                total_dialogue_turns += 1
 
         image_prompt = str(scene.get("image_prompt", "")).strip()
 
@@ -200,15 +329,13 @@ def validate_script(data, target_seconds=60):
         if image_prompt:
             image_prompts.append(image_prompt.lower())
 
+    if new_format and total_dialogue_turns == 0:
+        errors.append("Character-driven script contains no dialogue.")
+
     if len(image_prompts) != len(set(image_prompts)):
         warnings.append("Some scenes have duplicate image prompts.")
 
-    narration = " ".join(
-        str(scene.get("narration", ""))
-        for scene in scenes
-        if isinstance(scene, dict)
-    )
-
+    narration = " ".join(narration_parts)
     word_count = len(narration.split())
 
     try:
@@ -225,5 +352,7 @@ def validate_script(data, target_seconds=60):
         "warnings": warnings,
         "scene_count": len(scenes),
         "narration_word_count": word_count,
+        "character_count": len(character_ids),
+        "dialogue_turn_count": total_dialogue_turns,
     }
 
