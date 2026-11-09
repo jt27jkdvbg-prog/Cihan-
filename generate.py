@@ -735,6 +735,7 @@ def assemble(items, work, out_path, music=None):
             ["ffmpeg", "-y", "-i", str(it["audio"]), "-af", "apad", "-ar", "44100", "-ac", "2",
              "-t", f"{seg:.4f}", str(work / f"nar_{i:03d}.wav")]
         )
+        ambience(it.get("clip"), seg, work / f"amb_{i:03d}.wav")
         events += caption_events(it["words"], t)
         t += seg
     total = t
