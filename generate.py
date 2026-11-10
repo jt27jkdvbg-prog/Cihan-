@@ -26,6 +26,10 @@ from cinematic_director import (
     validate_script,
 )
 from quality_gate import require_real_motion, validate_motion_outputs
+from speech_director import (
+    build_voice_profiles,
+    build_speech_schedule,
+)
 from camera_director import build_zoompan_filter
 
 # ----------------------------------------------------------------------------
@@ -271,6 +275,7 @@ def write_script(topic, notes):
             "Senaryo kalite kontrolünden geçemedi: "
             + "; ".join(report["errors"])
         )
+    build_speech_schedule(data["scenes"], data["characters"])
 
     character_bible = data.get("character_bible", "")
 
@@ -442,7 +447,7 @@ def _pcm_to_mp3(pcm, rate, mp3_path):
     raw.unlink(missing_ok=True)
 
 
-def make_voice_gemini(text, mp3_path, prev_text="", next_text=""):
+def make_voice_gemini(text, mp3_path, prev_text="", next_text="", voice_name=None):
     client, types = _gemini_client()
     last = None
     for attempt in (1, 2, 3):
@@ -454,7 +459,9 @@ def make_voice_gemini(text, mp3_path, prev_text="", next_text=""):
                     response_modalities=["AUDIO"],
                     speech_config=types.SpeechConfig(
                         voice_config=types.VoiceConfig(
-                            prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=GEMINI_VOICE)
+                            prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                voice_name=voice_name or GEMINI_VOICE
+)
                         )
                     ),
                 ),
@@ -481,16 +488,25 @@ def make_voice_gemini(text, mp3_path, prev_text="", next_text=""):
     raise RuntimeError(f"Gemini TTS: {str(last)[:200]}")
 
 
-def make_voice_edge(text, mp3_path, prev_text="", next_text=""):
+def make_voice_edge(text, mp3_path, prev_text="", next_text="", voice_name=None):
     import asyncio
 
     import edge_tts
 
     async def go():
         try:
-            com = edge_tts.Communicate(text, EDGE_VOICE, rate=EDGE_RATE, boundary="WordBoundary")
+            com = edge_tts.Communicate(
+    text,
+    voice_name or EDGE_VOICE,
+    rate=EDGE_RATE,
+    boundary="WordBoundary"
+)
         except TypeError:  # eski sürüm
-            com = edge_tts.Communicate(text, EDGE_VOICE, rate=EDGE_RATE)
+            com = edge_tts.Communicate(
+    text,
+    voice_name or EDGE_VOICE,
+    rate=EDGE_RATE
+)
         audio, words = bytearray(), []
         async for ch in com.stream():
             if ch["type"] == "audio":
