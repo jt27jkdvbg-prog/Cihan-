@@ -76,11 +76,11 @@ def env_list(name, default):
 
 RESEARCH_MODELS = env_list(
     "GEMINI_RESEARCH_MODELS",
-    "gemini-2.5-flash,gemini-2.0-flash",
+    "gemini-3.8-flash,gemini-3.7-flash",
 )
 SCRIPT_MODELS = env_list(
     "GEMINI_SCRIPT_MODELS",
-    "gemini-2.5-flash,gemini-2.0-flash",
+    "gemini-3.8-flash,gemini-3.7-flash",
 )
 GEMINI_TIMEOUT_MS = env_int("GEMINI_TIMEOUT_SEC", 120, 20, 300) * 1000
 
@@ -242,9 +242,8 @@ def gemini_generate(
         for attempt in range(2):
             try:
                 config = {
-                    "temperature": 0.7,
-                    "max_output_tokens": max_tokens,
-                }
+    "max_output_tokens": max_tokens,
+}
 
                 if search:
                     config["tools"] = [
