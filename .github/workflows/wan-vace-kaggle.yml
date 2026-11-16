@@ -157,7 +157,7 @@ jobs:
               if not repo.exists():
                   run([
                       "git", "clone",
-                      "https://github.com/Wan-AI/Wan2.1.git",
+                      "https://github.com/Wan-Video/Wan2.1.git",
                       str(repo)
                   ])
 
