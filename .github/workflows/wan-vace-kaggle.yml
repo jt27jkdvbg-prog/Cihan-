@@ -216,7 +216,27 @@ jobs:
               traceback.print_exc()
               raise
           PY
+          python - <<'PY'
+          import json
+          from pathlib import Path
 
+          worker = Path("kaggle-worker/worker.py")
+          request = json.loads(
+              Path("kaggle-worker/request.json").read_text(encoding="utf-8")
+          )
+
+          source = worker.read_text(encoding="utf-8")
+          source = source.replace(
+              'REQUEST_FILE = Path(__file__).parent / "request.json"',
+              "REQUEST = " + repr(request)
+          )
+          source = source.replace(
+              '    with open(REQUEST_FILE, encoding="utf-8") as f:\n        request = json.load(f)',
+              '    request = REQUEST'
+          )
+          worker.write_text(source, encoding="utf-8")
+          print("İstek worker.py içine yerleştirildi.")
+          PY
       - name: Kaggle GPU görevini başlat
         run: |
           kaggle kernels push \
