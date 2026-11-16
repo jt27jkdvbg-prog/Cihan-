@@ -40,22 +40,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install kaggle six
 
-      - name: Kaggle kimlik doğrulama
+            - name: Kaggle kimlik doğrulama
         env:
-          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
         run: |
           mkdir -p ~/.kaggle
-          python - <<'PY'
-          import json, os
-          data = {
-              "username": os.environ["KAGGLE_USERNAME"],
-              "key": os.environ["KAGGLE_KEY"]
-          }
-          with open(os.path.expanduser("~/.kaggle/kaggle.json"), "w") as f:
-              json.dump(data, f)
-          os.chmod(os.path.expanduser("~/.kaggle/kaggle.json"), 0o600)
-          PY
+          printf '%s' "$KAGGLE_API_TOKEN" > ~/.kaggle/access_token
+          chmod 600 ~/.kaggle/access_token
           kaggle kernels list --mine
 
       - name: Kaggle görev dosyalarını hazırla
