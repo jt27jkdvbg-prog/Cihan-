@@ -160,6 +160,81 @@ jobs:
                       "https://github.com/Wan-Video/Wan2.1.git",
                       str(repo)
                   ])
+            
+              print("4A. T4 uyumluluk düzeltmeleri", flush=True)
+
+              model_file = repo / "wan" / "modules" / "model.py"
+              model_source = model_file.read_text(encoding="utf-8")
+
+              old_import = "from .attention import flash_attention"
+              if old_import not in model_source:
+                  raise RuntimeError("Wan attention import satırı bulunamadı.")
+
+              model_source = model_source.replace(
+                  old_import,
+                  "from .attention import attention",
+                  1
+              )
+
+              if "flash_attention(" not in model_source:
+                  raise RuntimeError("Attention çağrıları bulunamadı.")
+
+              model_source = model_source.replace(
+                  "flash_attention(",
+                  "attention("
+              )
+
+              if "flash_attention(" in model_source:
+                  raise RuntimeError("Attention dönüşümü tamamlanamadı.")
+
+              model_file.write_text(model_source, encoding="utf-8")
+
+              attention_file = repo / "wan" / "modules" / "attention.py"
+              attention_source = attention_file.read_text(encoding="utf-8")
+
+              old_dtype = "dtype=torch.bfloat16,"
+              if old_dtype not in attention_source:
+                  raise RuntimeError("Attention dtype ayarı bulunamadı.")
+
+              attention_source = attention_source.replace(
+                  old_dtype,
+                  "dtype=torch.float16,",
+                  1
+              )
+              attention_file.write_text(attention_source, encoding="utf-8")
+
+              shared_file = repo / "wan" / "configs" / "shared_config.py"
+              shared_source = shared_file.read_text(encoding="utf-8")
+
+              replacements = [
+                  (
+                      "wan_shared_cfg.t5_dtype = torch.bfloat16",
+                      "wan_shared_cfg.t5_dtype = torch.float16"
+                  ),
+                  (
+                      "wan_shared_cfg.param_dtype = torch.bfloat16",
+                      "wan_shared_cfg.param_dtype = torch.float16"
+                  )
+              ]
+
+              for old, new in replacements:
+                  if old not in shared_source:
+                      raise RuntimeError("Wan FP16 yapılandırma satırı bulunamadı.")
+                  shared_source = shared_source.replace(old, new, 1)
+
+              shared_file.write_text(shared_source, encoding="utf-8")
+
+              print("5. FP16 SDPA GPU testi", flush=True)
+
+              run([
+                  sys.executable, "-c",
+                  "import torch; "
+                  "assert torch.cuda.is_available(), 'CUDA yok'; "
+                  "q=torch.randn((1,2,128,64),device='cuda',dtype=torch.float16); "
+                  "o=torch.nn.functional.scaled_dot_product_attention(q,q,q); "
+                  "torch.cuda.synchronize(); "
+                  "print('FP16 SDPA OK:', tuple(o.shape))"
+              ])
 
               generator = repo / "generate.py"
 
