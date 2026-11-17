@@ -1,21 +1,24 @@
 
-name: Wan VACE - Kaggle GPU Video
+name: Wan Multi-Scene Film Generator
 
 on:
   workflow_dispatch:
     inputs:
       konu:
-        description: "Videonun konusu"
+        description: "Filmin konusu"
         required: true
         type: string
+
       prompt:
-        description: "Sahnenin ayrıntılı açıklaması"
+        description: "Ana hikaye ve karakter açıklaması"
         required: true
         type: string
+
       scenes_json:
-        description: "Sahnelerin JSON listesi (isteğe bağlı)"
+        description: "Sahne açıklamalarının JSON listesi"
         required: false
         type: string
+
       stil:
         description: "Görsel tarz"
         required: true
@@ -23,7 +26,7 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   generate:
@@ -42,18 +45,24 @@ jobs:
       - name: Kaggle CLI kur
         run: |
           python -m pip install --upgrade pip
-          pip install kaggle six
+          pip install --upgrade kaggle
 
       - name: Kaggle kimlik doğrulama
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
         run: |
+          if [ -z "$KAGGLE_API_TOKEN" ]; then
+            echo "KAGGLE_API_TOKEN eksik."
+            exit 1
+          fi
+
           mkdir -p ~/.kaggle
           printf '%s' "$KAGGLE_API_TOKEN" > ~/.kaggle/access_token
           chmod 600 ~/.kaggle/access_token
+
           kaggle kernels list --mine
 
-      - name: Kaggle görev dosyalarını hazırla
+      - name: Sahne isteğini ve worker dosyasını hazırla
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
           VIDEO_TOPIC: ${{ inputs.konu }}
@@ -61,37 +70,53 @@ jobs:
           VIDEO_SCENES_JSON: ${{ inputs.scenes_json }}
           VIDEO_STYLE: ${{ inputs.stil }}
         run: |
+          set -euo pipefail
+
           mkdir -p kaggle-worker
-                    scenes_json = os.environ.get("VIDEO_SCENES_JSON", "").strip()
+
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          owner = os.environ["KAGGLE_USERNAME"].strip().lower()
+
+          if not owner:
+              raise ValueError("KAGGLE_USERNAME boş olamaz.")
+
+          topic = os.environ["VIDEO_TOPIC"].strip()
+          prompt = os.environ["VIDEO_PROMPT"].strip()
+          style = os.environ["VIDEO_STYLE"].strip()
+
+          if not topic or not prompt or not style:
+              raise ValueError("Konu, prompt ve stil alanları zorunludur.")
+
+          scenes_json = os.environ.get("VIDEO_SCENES_JSON", "").strip()
 
           if scenes_json:
               scenes = json.loads(scenes_json)
-              if not isinstance(scenes, list) or not scenes:
-                  raise ValueError("scenes_json boş olmayan bir JSON listesi olmalı.")
-              if len(scenes) > 12:
-                  raise ValueError("En fazla 12 sahne gönderilebilir.")
-              if not all(isinstance(scene, str) and scene.strip() for scene in scenes):
-                  raise ValueError("Her sahne açıklaması boş olmayan bir metin olmalı.")
           else:
-              scenes = [os.environ["VIDEO_PROMPT"]]
+              scenes = [prompt]
+
+          if not isinstance(scenes, list) or not scenes:
+              raise ValueError("Sahneler boş olmayan bir JSON listesi olmalıdır.")
+
+          if len(scenes) > 12:
+              raise ValueError("En fazla 12 sahne üretilebilir.")
+
+          if not all(isinstance(s, str) and s.strip() for s in scenes):
+              raise ValueError("Her sahne açıklaması dolu bir metin olmalıdır.")
 
           request = {
-              "topic": os.environ["VIDEO_TOPIC"],
-              "prompt": os.environ["VIDEO_PROMPT"],
-              "style": os.environ["VIDEO_STYLE"],
+              "topic": topic,
+              "prompt": prompt,
+              "style": style,
               "scenes": scenes
-          }
-
-          
-          request = {
-              "topic": os.environ["VIDEO_TOPIC"],
-              "prompt": os.environ["VIDEO_PROMPT"],
-              "style": os.environ["VIDEO_STYLE"]
           }
 
           metadata = {
               "id": owner + "/cihan-wan-vace-worker",
-              "title": "Cihan Wan VACE Worker",
+              "title": "Cihan Wan Multi Scene Worker",
               "code_file": "worker.py",
               "language": "python",
               "kernel_type": "script",
@@ -105,24 +130,22 @@ jobs:
               "model_sources": []
           }
 
-          with open("kaggle-worker/kernel-metadata.json", "w") as f:
-              json.dump(metadata, f, indent=2)
+          Path("kaggle-worker/kernel-metadata.json").write_text(
+              json.dumps(metadata, indent=2),
+              encoding="utf-8"
+          )
 
-          with open("kaggle-worker/request.json", "w") as f:
-              json.dump(request, f, ensure_ascii=False, indent=2)
-          PY
-
-          cat > kaggle-worker/worker.py <<'PY'
+          worker = r'''
           import os
           import sys
           import json
+          import shutil
           import subprocess
           import traceback
           from pathlib import Path
 
           WORK = Path("/kaggle/working")
-          OUTPUT = WORK / "output.mp4"
-          REQUEST_FILE = Path(__file__).parent / "request.json"
+          REQUEST_JSON = None
 
           def run(command, cwd=None, timeout=None):
               print("\n>>>", " ".join(map(str, command)), flush=True)
@@ -133,46 +156,58 @@ jobs:
                   timeout=timeout
               )
 
-          try:
-              with open(REQUEST_FILE, encoding="utf-8") as f:
-                  request = json.load(f)
+          def main():
+              request = json.loads(REQUEST_JSON)
 
               topic = request["topic"]
-              prompt = request["prompt"]
               style = request["style"]
+              scenes = request["scenes"]
 
-              final_prompt = (
-                  f"{prompt}. Subject: {topic}. "
-                  f"Visual style: {style}. "
-                  "Cinematic composition, coherent motion, "
-                  "natural movement, detailed environment."
-              )
+              if not scenes:
+                  raise RuntimeError("Üretilecek sahne bulunamadı.")
+
+              output_dir = WORK / "film_output"
+              output_dir.mkdir(parents=True, exist_ok=True)
 
               print("1. GPU kontrolü", flush=True)
-              run([sys.executable, "-c",
-                   "import torch; print(torch.cuda.is_available()); "
-                   "print(torch.cuda.device_count()); "
-                   "print(torch.cuda.get_device_name(0))"])
 
-              print("2. Gerekli paketler", flush=True)
+              run([
+                  sys.executable, "-c",
+                  "import torch; "
+                  "assert torch.cuda.is_available(), 'CUDA bulunamadı'; "
+                  "print(torch.cuda.get_device_name(0))"
+              ])
+
+              print("2. Gerekli paketler kuruluyor", flush=True)
+
               run([
                   sys.executable, "-m", "pip", "install",
-                  "ftfy==6.3.1", "easydict",
-                  "imageio", "imageio-ffmpeg",
+                  "ftfy==6.3.1",
+                  "easydict",
+                  "imageio",
+                  "imageio-ffmpeg",
                   "opencv-python-headless",
                   "huggingface_hub"
               ])
 
-              print("3. Wan modelini indir", flush=True)
+              print("3. FFmpeg kontrolü", flush=True)
+
+              if not shutil.which("ffmpeg"):
+                  run(["apt-get", "update"])
+                  run(["apt-get", "install", "-y", "ffmpeg"])
+
+              print("4. Wan modeli indiriliyor", flush=True)
+
               from huggingface_hub import snapshot_download
 
               model_dir = snapshot_download(
                   repo_id="Wan-AI/Wan2.1-T2V-1.3B"
               )
 
-              print("Model klasörü:", model_dir, flush=True)
+              print("Model hazır:", model_dir, flush=True)
 
-              print("4. Wan deposunu indir", flush=True)
+              print("5. Wan deposu hazırlanıyor", flush=True)
+
               repo = WORK / "Wan2.1"
 
               if not repo.exists():
@@ -181,13 +216,14 @@ jobs:
                       "https://github.com/Wan-Video/Wan2.1.git",
                       str(repo)
                   ])
-            
-              print("4A. T4 uyumluluk düzeltmeleri", flush=True)
+
+              print("6. T4 uyumluluk kontrolleri", flush=True)
 
               model_file = repo / "wan" / "modules" / "model.py"
               model_source = model_file.read_text(encoding="utf-8")
 
               old_import = "from .attention import flash_attention"
+
               if old_import not in model_source:
                   raise RuntimeError("Wan attention import satırı bulunamadı.")
 
@@ -214,6 +250,7 @@ jobs:
               attention_source = attention_file.read_text(encoding="utf-8")
 
               old_dtype = "dtype=torch.bfloat16,"
+
               if old_dtype not in attention_source:
                   raise RuntimeError("Attention dtype ayarı bulunamadı.")
 
@@ -222,6 +259,7 @@ jobs:
                   "dtype=torch.float16,",
                   1
               )
+
               attention_file.write_text(attention_source, encoding="utf-8")
 
               shared_file = repo / "wan" / "configs" / "shared_config.py"
@@ -240,17 +278,19 @@ jobs:
 
               for old, new in replacements:
                   if old not in shared_source:
-                      raise RuntimeError("Wan FP16 yapılandırma satırı bulunamadı.")
+                      raise RuntimeError(
+                          "Wan FP16 yapılandırma satırı bulunamadı: " + old
+                      )
+
                   shared_source = shared_source.replace(old, new, 1)
 
               shared_file.write_text(shared_source, encoding="utf-8")
 
-              print("5. FP16 SDPA GPU testi", flush=True)
+              print("7. GPU hesaplama testi", flush=True)
 
               run([
                   sys.executable, "-c",
                   "import torch; "
-                  "assert torch.cuda.is_available(), 'CUDA yok'; "
                   "q=torch.randn((1,2,128,64),device='cuda',dtype=torch.float16); "
                   "o=torch.nn.functional.scaled_dot_product_attention(q,q,q); "
                   "torch.cuda.synchronize(); "
@@ -262,12 +302,15 @@ jobs:
               if not generator.exists():
                   raise RuntimeError("Wan generate.py bulunamadı.")
 
-              print("5. İsteğe bağlı prompt modülünü kontrol et", flush=True)
+              print("8. İsteğe bağlı prompt modülü kontrolü", flush=True)
+
               source = generator.read_text(encoding="utf-8")
+
               old = (
                   "from wan.utils.prompt_extend import "
                   "DashScopePromptExpander, QwenPromptExpander"
               )
+
               replacement = (
                   "try:\n"
                   "    from wan.utils.prompt_extend import "
@@ -279,63 +322,133 @@ jobs:
 
               if old in source:
                   generator.write_text(
-                      source.replace(old, replacement),
+                      source.replace(old, replacement, 1),
                       encoding="utf-8"
                   )
 
-              print("6. T2V video üretimi başlıyor", flush=True)
+              print("9. Çok sahneli üretim başlıyor", flush=True)
 
-              command = [
-                  sys.executable,
-                  str(generator),
-                  "--task", "t2v-1.3B",
-                  "--size", "832*480",
-                  "--frame_num", "17",
-                  "--ckpt_dir", model_dir,
-                  "--offload_model", "True",
-                  "--t5_cpu",
-                  "--prompt", final_prompt,
-                  "--sample_steps", "8",
-                  "--sample_guide_scale", "6",
-                  "--sample_shift", "8",
-                  "--save_file", str(OUTPUT)
-              ]
+              generated_clips = []
 
-              run(command, cwd=str(repo), timeout=20000)
+              for index, scene in enumerate(scenes, start=1):
+                  scene_file = output_dir / f"scene_{index:02d}.mp4"
 
-              if not OUTPUT.exists() or OUTPUT.stat().st_size < 10000:
-                  raise RuntimeError("Video oluşmadı veya dosya boş.")
+                  final_prompt = (
+                      f"{scene}. "
+                      f"Story context: {topic}. "
+                      f"Visual style: {style}. "
+                      "Maintain visual continuity with the same story. "
+                      "Cinematic composition, natural movement, "
+                      "detailed environment, coherent action."
+                  )
 
-              print("BAŞARILI:", OUTPUT, flush=True)
-              print("Boyut:", OUTPUT.stat().st_size, "byte", flush=True)
+                  print(
+                      f"SAHNE {index}/{len(scenes)} ÜRETİLİYOR",
+                      flush=True
+                  )
 
+                  command = [
+                      sys.executable,
+                      str(generator),
+                      "--task", "t2v-1.3B",
+                      "--size", "832*480",
+                      "--frame_num", "17",
+                      "--ckpt_dir", model_dir,
+                      "--offload_model", "True",
+                      "--t5_cpu",
+                      "--prompt", final_prompt,
+                      "--sample_steps", "8",
+                      "--sample_guide_scale", "6",
+                      "--sample_shift", "8",
+                      "--save_file", str(scene_file)
+                  ]
+
+                  run(command, cwd=str(repo), timeout=20000)
+
+                  if not scene_file.exists():
+                      raise RuntimeError(
+                          f"Sahne {index} video dosyası oluşturmadı."
+                      )
+
+                  if scene_file.stat().st_size < 10000:
+                      raise RuntimeError(
+                          f"Sahne {index} video dosyası çok küçük."
+                      )
+
+                  generated_clips.append(scene_file)
+
+                  print(
+                      f"Sahne {index} tamamlandı: "
+                      f"{scene_file.stat().st_size} byte",
+                      flush=True
+                  )
+
+              print("10. Sahne videoları birleştiriliyor", flush=True)
+
+              concat_file = output_dir / "concat_list.txt"
+
+              concat_file.write_text(
+                  "".join(
+                      f"file '{clip.as_posix()}'\n"
+                      for clip in generated_clips
+                  ),
+                  encoding="utf-8"
+              )
+
+              final_video = WORK / "film.mp4"
+
+              run([
+                  "ffmpeg",
+                  "-y",
+                  "-f", "concat",
+                  "-safe", "0",
+                  "-i", str(concat_file),
+                  "-c:v", "libx264",
+                  "-preset", "veryfast",
+                  "-crf", "20",
+                  "-pix_fmt", "yuv420p",
+                  "-r", "16",
+                  "-movflags", "+faststart",
+                  "-an",
+                  str(final_video)
+              ])
+
+              if not final_video.exists():
+                  raise RuntimeError("Birleştirilmiş film bulunamadı.")
+
+              if final_video.stat().st_size < 10000:
+                  raise RuntimeError("Final film dosyası geçersiz.")
+
+              print("11. Üretim tamamlandı", flush=True)
+              print("Final:", final_video, flush=True)
+              print("Boyut:", final_video.stat().st_size, flush=True)
+              print("Sahne sayısı:", len(generated_clips), flush=True)
+
+          try:
+              main()
           except Exception:
               traceback.print_exc()
               raise
-          PY
-          python - <<'PY'
-          import json
-          from pathlib import Path
+          '''
 
-          worker = Path("kaggle-worker/worker.py")
-          request = json.loads(
-              Path("kaggle-worker/request.json").read_text(encoding="utf-8")
+          worker = worker.replace(
+              "REQUEST_JSON = None",
+              "REQUEST_JSON = " + repr(json.dumps(request, ensure_ascii=False))
           )
 
-          source = worker.read_text(encoding="utf-8")
-          source = source.replace(
-              'REQUEST_FILE = Path(__file__).parent / "request.json"',
-              "REQUEST = " + repr(request)
+          Path("kaggle-worker/worker.py").write_text(
+              worker,
+              encoding="utf-8"
           )
-          source = source.replace(
-              '    with open(REQUEST_FILE, encoding="utf-8") as f:\n        request = json.load(f)',
-              '    request = REQUEST'
-          )
-          worker.write_text(source, encoding="utf-8")
-          print("İstek worker.py içine yerleştirildi.")
+
+          print("Sahne sayısı:", len(scenes))
+          print("Worker ve metadata hazır.")
           PY
+
       - name: Kaggle GPU görevini başlat
         run: |
+          set -euo pipefail
+
           kaggle kernels push \
             -p kaggle-worker \
             --timeout 21600 \
@@ -345,17 +458,22 @@ jobs:
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
         run: |
+          set -euo pipefail
+
           KERNEL="${KAGGLE_USERNAME,,}/cihan-wan-vace-worker"
+
           for i in $(seq 1 180); do
             STATUS=$(kaggle kernels status "$KERNEL" 2>&1 || true)
+
             echo "$STATUS"
 
-            if echo "$STATUS" | grep -q "COMPLETE"; then
+            if echo "$STATUS" | grep -Eiq "COMPLETE"; then
+              echo "Kaggle üretimi tamamlandı."
               exit 0
             fi
 
-            if echo "$STATUS" | grep -q "ERROR"; then
-              echo "Kaggle üretim görevi hata verdi."
+            if echo "$STATUS" | grep -Eiq "ERROR|CANCELLED"; then
+              echo "Kaggle üretim görevi başarısız."
               kaggle kernels logs "$KERNEL" || true
               exit 1
             fi
@@ -367,26 +485,38 @@ jobs:
           kaggle kernels logs "$KERNEL" || true
           exit 1
 
-      - name: MP4 dosyasını Kaggle'dan al
+      - name: Film dosyalarını indir
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
         run: |
-          KERNEL="${KAGGLE_USERNAME,,}/cihan-wan-vace-worker"
-          mkdir -p output
-          kaggle kernels output "$KERNEL" -p output --force
-          find output -maxdepth 2 -type f -print
+          set -euo pipefail
 
-          VIDEO=$(find output -type f -name "*.mp4" | head -n 1)
+          KERNEL="${KAGGLE_USERNAME,,}/cihan-wan-vace-worker"
+
+          mkdir -p output
+
+          kaggle kernels output "$KERNEL" -p output --force
+
+          echo "İndirilen dosyalar:"
+          find output -type f -print
+
+          VIDEO=$(find output -type f -name "film.mp4" | head -n 1)
+
           if [ -z "$VIDEO" ]; then
-            echo "Kaggle çıktısında MP4 bulunamadı."
+            echo "Final film bulunamadı."
+            kaggle kernels logs "$KERNEL" || true
             exit 1
           fi
 
-          cp "$VIDEO" output/video.mp4
+          cp "$VIDEO" output/final-film.mp4
 
-      - name: Videoyu GitHub'a yükle
+      - name: Film çıktısını sakla
         uses: actions/upload-artifact@v4
         with:
-          name: wan-vace-video
-          path: output/video.mp4
+          name: cihan-multi-scene-film
+          path: |
+            output/final-film.mp4
+            output/**/*.mp4
+          if-no-files-found: error
           retention-days: 7
+
