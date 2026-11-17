@@ -199,7 +199,7 @@ jobs:
                   "--offload_model", "True",
                   "--t5_cpu",
                   "--prompt", final_prompt,
-                  "--sample_steps", "8",
+                  "--sample_steps", "50",
                   "--sample_guide_scale", "5",
                   "--save_file", str(OUTPUT)
               ]
