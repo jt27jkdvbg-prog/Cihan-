@@ -1495,14 +1495,12 @@ def make_motion(image_path, prompt, duration, output_path):
 
     result = fal_client.subscribe(
         VIDEO_MODEL,
-        arguments={
+                arguments={
             "prompt": prompt,
             "image_url": uploaded,
             "resolution": VIDEO_RES,
             "aspect_ratio": "9:16",
-            "duration": duration,
-            "negative_prompt": NEGATIVE,
-            "enable_safety_checker": True,
+            "duration": str(duration),
         },
     )
 
