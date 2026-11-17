@@ -269,7 +269,7 @@ jobs:
                   str(generator),
                   "--task", "t2v-1.3B",
                   "--size", "832*480",
-                  "--frame_num", "81",
+                  "--frame_num", "17",
                   "--ckpt_dir", model_dir,
                   "--offload_model", "True",
                   "--t5_cpu",
