@@ -193,7 +193,7 @@ jobs:
                   sys.executable,
                   str(generator),
                   "--task", "t2v-1.3B",
-                  "--size", "480*832",
+                  "--size", "832*480",
                   "--frame_num", "17",
                   "--ckpt_dir", model_dir,
                   "--offload_model", "True",
