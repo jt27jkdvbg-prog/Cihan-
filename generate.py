@@ -2150,7 +2150,7 @@ def main():
                     min(
                         12,
                         max(
-                            3,
+                            4,
                             math.ceil(
                                 audio_duration(audio_path) + PAD
                             ),
