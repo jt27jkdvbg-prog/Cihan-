@@ -12,6 +12,10 @@ on:
         description: "Sahnenin ayrıntılı açıklaması"
         required: true
         type: string
+      scenes_json:
+        description: "Sahnelerin JSON listesi (isteğe bağlı)"
+        required: false
+        type: string
       stil:
         description: "Görsel tarz"
         required: true
@@ -54,14 +58,31 @@ jobs:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
           VIDEO_TOPIC: ${{ inputs.konu }}
           VIDEO_PROMPT: ${{ inputs.prompt }}
+          VIDEO_SCENES_JSON: ${{ inputs.scenes_json }}
           VIDEO_STYLE: ${{ inputs.stil }}
         run: |
           mkdir -p kaggle-worker
+                    scenes_json = os.environ.get("VIDEO_SCENES_JSON", "").strip()
 
-          python - <<'PY'
-          import json, os
+          if scenes_json:
+              scenes = json.loads(scenes_json)
+              if not isinstance(scenes, list) or not scenes:
+                  raise ValueError("scenes_json boş olmayan bir JSON listesi olmalı.")
+              if len(scenes) > 12:
+                  raise ValueError("En fazla 12 sahne gönderilebilir.")
+              if not all(isinstance(scene, str) and scene.strip() for scene in scenes):
+                  raise ValueError("Her sahne açıklaması boş olmayan bir metin olmalı.")
+          else:
+              scenes = [os.environ["VIDEO_PROMPT"]]
 
-          owner = os.environ["KAGGLE_USERNAME"].strip().lower()
+          request = {
+              "topic": os.environ["VIDEO_TOPIC"],
+              "prompt": os.environ["VIDEO_PROMPT"],
+              "style": os.environ["VIDEO_STYLE"],
+              "scenes": scenes
+          }
+
+          
           request = {
               "topic": os.environ["VIDEO_TOPIC"],
               "prompt": os.environ["VIDEO_PROMPT"],
