@@ -42,7 +42,7 @@ jobs:
       - name: Kaggle CLI kur
         run: |
           python -m pip install --upgrade pip
-          pip install --upgrade kaggle
+          pip install --upgrade kaggle six
 
       - name: Kaggle kimlik doğrulama
         env:
