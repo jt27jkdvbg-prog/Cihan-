@@ -187,7 +187,7 @@ jobs:
                       encoding="utf-8"
                   )
 
-              print("6. VACE video üretimi başlıyor", flush=True)
+              print("6. T2V video üretimi başlıyor", flush=True)
 
               command = [
                   sys.executable,
