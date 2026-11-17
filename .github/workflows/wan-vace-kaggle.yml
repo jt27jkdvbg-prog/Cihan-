@@ -192,7 +192,7 @@ jobs:
               command = [
                   sys.executable,
                   str(generator),
-                  "--task", "vace-1.3B",
+                  "--task", "t2v-1.3B",
                   "--size", "480*832",
                   "--frame_num", "17",
                   "--ckpt_dir", model_dir,
