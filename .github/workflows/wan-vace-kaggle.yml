@@ -108,7 +108,7 @@ jobs:
           }
 
           metadata = {
-              "id": owner + "/cihan-multi-scene-film-worker
+              "id": owner + "/cihan-multi-scene-film-worker",
               "title": "Cihan Multi Scene Film Worker",
               "code_file": "worker.py",
               "language": "python",
@@ -464,7 +464,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          KERNEL="${KAGGLE_USERNAME,,}/cihan-multi-scene-film-worker
+          KERNEL="${KAGGLE_USERNAME,,}/cihan-multi-scene-film-worker"
 
           for i in $(seq 1 180); do
             STATUS=$(kaggle kernels status "$KERNEL" 2>&1 || true)
@@ -494,7 +494,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          KERNEL="${KAGGLE_USERNAME,,}/cihan-multi-scene-film-worker
+          KERNEL="${KAGGLE_USERNAME,,}/cihan-multi-scene-film-worker"
 
           mkdir -p output
 
