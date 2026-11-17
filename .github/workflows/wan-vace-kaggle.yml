@@ -8,17 +8,14 @@ on:
         description: "Filmin konusu"
         required: true
         type: string
-
       prompt:
         description: "Ana hikaye ve karakter açıklaması"
         required: true
         type: string
-
       scenes_json:
         description: "Sahne açıklamalarının JSON listesi"
         required: false
         type: string
-
       stil:
         description: "Görsel tarz"
         required: true
@@ -51,6 +48,8 @@ jobs:
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
         run: |
+          set -euo pipefail
+
           if [ -z "$KAGGLE_API_TOKEN" ]; then
             echo "KAGGLE_API_TOKEN eksik."
             exit 1
@@ -62,7 +61,7 @@ jobs:
 
           kaggle kernels list --mine
 
-      - name: Sahne isteğini ve worker dosyasını hazırla
+      - name: Worker dosyasını hazırla
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
           VIDEO_TOPIC: ${{ inputs.konu }}
@@ -71,7 +70,6 @@ jobs:
           VIDEO_STYLE: ${{ inputs.stil }}
         run: |
           set -euo pipefail
-
           mkdir -p kaggle-worker
 
           python - <<'PY'
@@ -80,32 +78,27 @@ jobs:
           from pathlib import Path
 
           owner = os.environ["KAGGLE_USERNAME"].strip().lower()
-
-          if not owner:
-              raise ValueError("KAGGLE_USERNAME boş olamaz.")
-
           topic = os.environ["VIDEO_TOPIC"].strip()
           prompt = os.environ["VIDEO_PROMPT"].strip()
           style = os.environ["VIDEO_STYLE"].strip()
 
+          if not owner:
+              raise ValueError("KAGGLE_USERNAME boş olamaz.")
+
           if not topic or not prompt or not style:
-              raise ValueError("Konu, prompt ve stil alanları zorunludur.")
+              raise ValueError("Konu, prompt ve stil zorunludur.")
 
-          scenes_json = os.environ.get("VIDEO_SCENES_JSON", "").strip()
-
-          if scenes_json:
-              scenes = json.loads(scenes_json)
-          else:
-              scenes = [prompt]
+          raw_scenes = os.environ.get("VIDEO_SCENES_JSON", "").strip()
+          scenes = json.loads(raw_scenes) if raw_scenes else [prompt]
 
           if not isinstance(scenes, list) or not scenes:
-              raise ValueError("Sahneler boş olmayan bir JSON listesi olmalıdır.")
+              raise ValueError("Sahneler JSON listesi olmalıdır.")
 
           if len(scenes) > 12:
               raise ValueError("En fazla 12 sahne üretilebilir.")
 
           if not all(isinstance(s, str) and s.strip() for s in scenes):
-              raise ValueError("Her sahne açıklaması dolu bir metin olmalıdır.")
+              raise ValueError("Her sahne dolu bir metin olmalıdır.")
 
           request = {
               "topic": topic,
@@ -116,7 +109,7 @@ jobs:
 
           metadata = {
               "id": owner + "/cihan-wan-vace-worker",
-              "title": "Cihan Wan Multi Scene Worker",
+              "title": "Cihan Multi Scene Film Worker",
               "code_file": "worker.py",
               "language": "python",
               "kernel_type": "script",
@@ -136,7 +129,6 @@ jobs:
           )
 
           worker = r'''
-          import os
           import sys
           import json
           import shutil
@@ -148,7 +140,7 @@ jobs:
           REQUEST_JSON = None
 
           def run(command, cwd=None, timeout=None):
-              print("\n>>>", " ".join(map(str, command)), flush=True)
+              print("\\n>>>", " ".join(map(str, command)), flush=True)
               subprocess.run(
                   command,
                   cwd=cwd,
@@ -158,13 +150,9 @@ jobs:
 
           def main():
               request = json.loads(REQUEST_JSON)
-
               topic = request["topic"]
               style = request["style"]
               scenes = request["scenes"]
-
-              if not scenes:
-                  raise RuntimeError("Üretilecek sahne bulunamadı.")
 
               output_dir = WORK / "film_output"
               output_dir.mkdir(parents=True, exist_ok=True)
@@ -178,23 +166,32 @@ jobs:
                   "print(torch.cuda.get_device_name(0))"
               ])
 
-              print("2. Gerekli paketler kuruluyor", flush=True)
+              print("2. Wan bağımlılıkları kuruluyor", flush=True)
 
               run([
                   sys.executable, "-m", "pip", "install",
                   "ftfy==6.3.1",
                   "easydict",
+                  "einops",
+                  "timm",
+                  "safetensors",
+                  "diffusers>=0.31.0",
+                  "transformers>=4.49.0",
+                  "tokenizers>=0.20.3",
+                  "accelerate>=1.1.1",
+                  "tqdm",
+                  "numpy>=1.23.5,<2",
                   "imageio",
                   "imageio-ffmpeg",
                   "opencv-python-headless",
                   "huggingface_hub"
-              ])
+              ], timeout=3600)
 
               print("3. FFmpeg kontrolü", flush=True)
 
               if not shutil.which("ffmpeg"):
-                  run(["apt-get", "update"])
-                  run(["apt-get", "install", "-y", "ffmpeg"])
+                  run(["apt-get", "update"], timeout=1200)
+                  run(["apt-get", "install", "-y", "ffmpeg"], timeout=1200)
 
               print("4. Wan modeli indiriliyor", flush=True)
 
@@ -215,9 +212,9 @@ jobs:
                       "git", "clone",
                       "https://github.com/Wan-Video/Wan2.1.git",
                       str(repo)
-                  ])
+                  ], timeout=1800)
 
-              print("6. T4 uyumluluk kontrolleri", flush=True)
+              print("6. T4 FP16 uyumluluğu ayarlanıyor", flush=True)
 
               model_file = repo / "wan" / "modules" / "model.py"
               model_source = model_file.read_text(encoding="utf-8")
@@ -225,7 +222,7 @@ jobs:
               old_import = "from .attention import flash_attention"
 
               if old_import not in model_source:
-                  raise RuntimeError("Wan attention import satırı bulunamadı.")
+                  raise RuntimeError("Attention import satırı bulunamadı.")
 
               model_source = model_source.replace(
                   old_import,
@@ -252,15 +249,20 @@ jobs:
               old_dtype = "dtype=torch.bfloat16,"
 
               if old_dtype not in attention_source:
-                  raise RuntimeError("Attention dtype ayarı bulunamadı.")
+                  raise RuntimeError("Attention BF16 ayarı bulunamadı.")
 
               attention_source = attention_source.replace(
                   old_dtype,
-                  "dtype=torch.float16,",
-                  1
+                  "dtype=torch.float16,"
               )
 
-              attention_file.write_text(attention_source, encoding="utf-8")
+              if old_dtype in attention_source:
+                  raise RuntimeError("Tüm BF16 ayarları FP16 yapılamadı.")
+
+              attention_file.write_text(
+                  attention_source,
+                  encoding="utf-8"
+              )
 
               shared_file = repo / "wan" / "configs" / "shared_config.py"
               shared_source = shared_file.read_text(encoding="utf-8")
@@ -279,14 +281,16 @@ jobs:
               for old, new in replacements:
                   if old not in shared_source:
                       raise RuntimeError(
-                          "Wan FP16 yapılandırma satırı bulunamadı: " + old
+                          "FP16 yapılandırma satırı bulunamadı: " + old
                       )
-
                   shared_source = shared_source.replace(old, new, 1)
 
-              shared_file.write_text(shared_source, encoding="utf-8")
+              shared_file.write_text(
+                  shared_source,
+                  encoding="utf-8"
+              )
 
-              print("7. GPU hesaplama testi", flush=True)
+              print("7. FP16 GPU testi", flush=True)
 
               run([
                   sys.executable, "-c",
@@ -326,7 +330,7 @@ jobs:
                       encoding="utf-8"
                   )
 
-              print("9. Çok sahneli üretim başlıyor", flush=True)
+              print("9. Çok sahneli video üretimi", flush=True)
 
               generated_clips = []
 
@@ -372,7 +376,7 @@ jobs:
 
                   if scene_file.stat().st_size < 10000:
                       raise RuntimeError(
-                          f"Sahne {index} video dosyası çok küçük."
+                          f"Sahne {index} video dosyası geçersiz."
                       )
 
                   generated_clips.append(scene_file)
@@ -383,7 +387,7 @@ jobs:
                       flush=True
                   )
 
-              print("10. Sahne videoları birleştiriliyor", flush=True)
+              print("10. Videolar birleştiriliyor", flush=True)
 
               concat_file = output_dir / "concat_list.txt"
 
@@ -419,10 +423,10 @@ jobs:
               if final_video.stat().st_size < 10000:
                   raise RuntimeError("Final film dosyası geçersiz.")
 
-              print("11. Üretim tamamlandı", flush=True)
+              print("ÜRETİM TAMAMLANDI", flush=True)
               print("Final:", final_video, flush=True)
-              print("Boyut:", final_video.stat().st_size, flush=True)
               print("Sahne sayısı:", len(generated_clips), flush=True)
+              print("Dosya boyutu:", final_video.stat().st_size, flush=True)
 
           try:
               main()
@@ -464,7 +468,6 @@ jobs:
 
           for i in $(seq 1 180); do
             STATUS=$(kaggle kernels status "$KERNEL" 2>&1 || true)
-
             echo "$STATUS"
 
             if echo "$STATUS" | grep -Eiq "COMPLETE"; then
@@ -473,7 +476,7 @@ jobs:
             fi
 
             if echo "$STATUS" | grep -Eiq "ERROR|CANCELLED"; then
-              echo "Kaggle üretim görevi başarısız."
+              echo "Kaggle üretimi başarısız."
               kaggle kernels logs "$KERNEL" || true
               exit 1
             fi
@@ -519,4 +522,3 @@ jobs:
             output/**/*.mp4
           if-no-files-found: error
           retention-days: 7
-
