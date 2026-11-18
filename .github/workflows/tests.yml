@@ -42,7 +42,7 @@ jobs:
       - name: Paketleri kur
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements.txt pytest
 
       - name: Python dosyalarını derleme kontrolü
         run: |
@@ -54,10 +54,15 @@ jobs:
             dialogue_director.py \
             speech_director.py \
             quality_gate.py \
-            pipeline_config.py
+            pipeline_config.py \
+            wan_performance.py
 
       - name: Ana testleri çalıştır
         run: python -m unittest discover -s tests -v
 
+      - name: Wan performans testlerini çalıştır
+        run: python -m pytest tests/test_wan_performance.py -v
+
       - name: Ses yönetmeni testlerini çalıştır
         run: python -m unittest test_speech_director -v
+
