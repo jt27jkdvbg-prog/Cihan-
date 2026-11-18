@@ -94,7 +94,7 @@ jobs:
 
           from film_project import validate_film_project
 
-                    run_mode = os.environ.get("VIDEO_RUN_MODE", "preflight").strip()
+          run_mode = os.environ.get("VIDEO_RUN_MODE", "preflight").strip()
           if run_mode not in {"preflight", "production"}:
               raise ValueError("Geçersiz run_mode: " + run_mode)
 
