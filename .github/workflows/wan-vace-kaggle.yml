@@ -4,21 +4,25 @@ name: Wan Multi-Scene Film Generator
 on:
   workflow_dispatch:
     inputs:
+      project_json:
+        description: "Standart film projesi JSON (öncelikli yöntem)"
+        required: false
+        type: string
       konu:
-        description: "Filmin konusu"
-        required: true
+        description: "Filmin konusu (eski yöntem)"
+        required: false
         type: string
       prompt:
-        description: "Ana hikaye ve karakter açıklaması"
-        required: true
+        description: "Ana hikaye ve karakter açıklaması (eski yöntem)"
+        required: false
         type: string
       scenes_json:
-        description: "Sahne açıklamalarının JSON listesi"
+        description: "Sahne açıklamalarının JSON listesi (eski yöntem)"
         required: false
         type: string
       stil:
         description: "Görsel tarz"
-        required: true
+        required: false
         default: "cinematic realistic"
         type: string
 
@@ -41,6 +45,7 @@ jobs:
 
       - name: Kaggle CLI kur
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install --upgrade kaggle six
 
@@ -61,9 +66,10 @@ jobs:
 
           kaggle kernels list --mine
 
-      - name: Worker dosyasını hazırla
+      - name: Film projesini doğrula ve Worker hazırla
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          VIDEO_PROJECT_JSON: ${{ inputs.project_json }}
           VIDEO_TOPIC: ${{ inputs.konu }}
           VIDEO_PROMPT: ${{ inputs.prompt }}
           VIDEO_SCENES_JSON: ${{ inputs.scenes_json }}
@@ -77,33 +83,210 @@ jobs:
           import os
           from pathlib import Path
 
+          from film_project import validate_film_project
+
           owner = os.environ["KAGGLE_USERNAME"].strip().lower()
-          topic = os.environ["VIDEO_TOPIC"].strip()
-          prompt = os.environ["VIDEO_PROMPT"].strip()
-          style = os.environ["VIDEO_STYLE"].strip()
+          raw_project = os.environ.get("VIDEO_PROJECT_JSON", "").strip()
+          topic_input = os.environ.get("VIDEO_TOPIC", "").strip()
+          prompt_input = os.environ.get("VIDEO_PROMPT", "").strip()
+          style_input = os.environ.get("VIDEO_STYLE", "").strip() or "cinematic realistic"
+          raw_scenes = os.environ.get("VIDEO_SCENES_JSON", "").strip()
 
           if not owner:
               raise ValueError("KAGGLE_USERNAME boş olamaz.")
 
+          if raw_project:
+              print("Standart film projesi bulundu. JSON doğrulanıyor...")
+
+              try:
+                  project = json.loads(raw_project)
+              except json.JSONDecodeError as exc:
+                  raise ValueError(
+                      f"project_json geçerli JSON değil: {exc}"
+                  ) from exc
+
+              report = validate_film_project(project)
+
+              if not report["valid"]:
+                  details = "\n".join(
+                      "- " + error for error in report["errors"]
+                  )
+                  raise ValueError(
+                      "Film projesi doğrulamadan geçemedi:\n" + details
+                  )
+
+              film = project["film"]
+              characters = project["characters"]
+
+              topic = (
+                  str(film.get("topic") or "").strip()
+                  or str(film.get("title") or "").strip()
+              )
+
+              prompt_parts = [
+                  str(film.get("description") or "").strip(),
+                  str(film.get("character_bible") or "").strip(),
+              ]
+
+              prompt = " ".join(part for part in prompt_parts if part).strip()
+
+              if not prompt:
+                  prompt = str(film.get("title") or "Short film").strip()
+
+              style = (
+                  str(film.get("visual_style") or "").strip()
+                  or style_input
+              )
+
+              character_descriptions = []
+
+              for character in characters:
+                  description = (
+                      f"{character['name']}: "
+                      f"{character.get('description', '')}. "
+                      f"Personality: {character.get('personality', '')}."
+                  ).strip()
+
+                  character_descriptions.append(description)
+
+              character_bible = " ".join(character_descriptions)
+
+              scenes = []
+
+              for index, scene in enumerate(project["scenes"], 1):
+                  parts = []
+
+                  if scene.get("visual_subject"):
+                      parts.append(
+                          "Visual subject: " + scene["visual_subject"]
+                      )
+
+                  if scene.get("location"):
+                      parts.append("Location: " + scene["location"])
+
+                  if scene.get("action"):
+                      parts.append("Action: " + scene["action"])
+
+                  if scene.get("props"):
+                      parts.append("Props: " + scene["props"])
+
+                  if scene.get("image_prompt"):
+                      parts.append(
+                          "Visual description: " + scene["image_prompt"]
+                      )
+
+                  if scene.get("motion_prompt"):
+                      parts.append(
+                          "Movement direction: " + scene["motion_prompt"]
+                      )
+
+                  if scene.get("camera"):
+                      parts.append("Camera: " + scene["camera"])
+
+                  if scene.get("narration"):
+                      parts.append(
+                          "Narrative context: " + scene["narration"]
+                      )
+
+                  dialogue_lines = []
+
+                  for turn in scene.get("dialogue_turns", []):
+                      speaker_id = turn.get("speaker", "")
+                      speaker = next(
+                          (
+                              character["name"]
+                              for character in characters
+                              if character["id"] == speaker_id
+                          ),
+                          speaker_id
+                      )
+
+                      dialogue_lines.append(
+                          f"{speaker} says: {turn['text']}"
+                      )
+
+                  if dialogue_lines:
+                      parts.append(
+                          "Dialogue context, not subtitles: "
+                          + " ".join(dialogue_lines)
+                      )
+
+                  if scene.get("sound"):
+                      parts.append(
+                          "Intended sound atmosphere: " + scene["sound"]
+                      )
+
+                  if scene.get("transition"):
+                      parts.append(
+                          "Transition context: " + scene["transition"]
+                      )
+
+                  scene_prompt = ". ".join(
+                      part for part in parts if part
+                  ).strip()
+
+                  if not scene_prompt:
+                      raise ValueError(
+                          f"{index}. sahnenin üretim açıklaması boş."
+                      )
+
+                  scenes.append(scene_prompt)
+
+              print("Standart proje doğrulandı.")
+              print("Film:", film.get("title"))
+              print("Karakter:", len(characters))
+              print("Sahne:", len(scenes))
+              print("Hedef süre:", film.get("target_duration_seconds"), "sn")
+
+          else:
+              print("Eski giriş yöntemi kullanılıyor.")
+
+              if not topic_input or not prompt_input:
+                  raise ValueError(
+                      "project_json kullanmıyorsanız konu ve prompt zorunludur."
+                  )
+
+              topic = topic_input
+              prompt = prompt_input
+              style = style_input
+
+              scenes = json.loads(raw_scenes) if raw_scenes else [prompt]
+
+              if not isinstance(scenes, list) or not scenes:
+                  raise ValueError(
+                      "Sahneler JSON listesi olmalıdır."
+                  )
+
+              if len(scenes) > 15:
+                  raise ValueError(
+                      "En fazla 15 sahne üretilebilir."
+                  )
+
+              if not all(
+                  isinstance(scene, str) and scene.strip()
+                  for scene in scenes
+              ):
+                  raise ValueError(
+                      "Her sahne dolu bir metin olmalıdır."
+                  )
+
+              character_bible = ""
+
+          if not 1 <= len(scenes) <= 15:
+              raise ValueError(
+                  "Sahne sayısı 1 ile 15 arasında olmalıdır."
+              )
+
           if not topic or not prompt or not style:
-              raise ValueError("Konu, prompt ve stil zorunludur.")
-
-          raw_scenes = os.environ.get("VIDEO_SCENES_JSON", "").strip()
-          scenes = json.loads(raw_scenes) if raw_scenes else [prompt]
-
-          if not isinstance(scenes, list) or not scenes:
-              raise ValueError("Sahneler JSON listesi olmalıdır.")
-
-          if len(scenes) > 15:
-              raise ValueError("En fazla 15 sahne üretilebilir.")
-
-          if not all(isinstance(s, str) and s.strip() for s in scenes):
-              raise ValueError("Her sahne dolu bir metin olmalıdır.")
+              raise ValueError(
+                  "Konu, ana prompt ve görsel stil boş olamaz."
+              )
 
           request = {
               "topic": topic,
               "prompt": prompt,
               "style": style,
+              "character_bible": character_bible,
               "scenes": scenes
           }
 
@@ -153,6 +336,7 @@ jobs:
               topic = request["topic"]
               style = request["style"]
               scenes = request["scenes"]
+              character_bible = request.get("character_bible", "")
 
               output_dir = WORK / "film_output"
               output_dir.mkdir(parents=True, exist_ok=True)
@@ -222,7 +406,9 @@ jobs:
               old_import = "from .attention import flash_attention"
 
               if old_import not in model_source:
-                  raise RuntimeError("Attention import satırı bulunamadı.")
+                  raise RuntimeError(
+                      "Attention import satırı bulunamadı."
+                  )
 
               model_source = model_source.replace(
                   old_import,
@@ -231,7 +417,9 @@ jobs:
               )
 
               if "flash_attention(" not in model_source:
-                  raise RuntimeError("Attention çağrıları bulunamadı.")
+                  raise RuntimeError(
+                      "Attention çağrıları bulunamadı."
+                  )
 
               model_source = model_source.replace(
                   "flash_attention(",
@@ -239,17 +427,26 @@ jobs:
               )
 
               if "flash_attention(" in model_source:
-                  raise RuntimeError("Attention dönüşümü tamamlanamadı.")
+                  raise RuntimeError(
+                      "Attention dönüşümü tamamlanamadı."
+                  )
 
-              model_file.write_text(model_source, encoding="utf-8")
+              model_file.write_text(
+                  model_source,
+                  encoding="utf-8"
+              )
 
               attention_file = repo / "wan" / "modules" / "attention.py"
-              attention_source = attention_file.read_text(encoding="utf-8")
+              attention_source = attention_file.read_text(
+                  encoding="utf-8"
+              )
 
               old_dtype = "dtype=torch.bfloat16,"
 
               if old_dtype not in attention_source:
-                  raise RuntimeError("Attention BF16 ayarı bulunamadı.")
+                  raise RuntimeError(
+                      "Attention BF16 ayarı bulunamadı."
+                  )
 
               attention_source = attention_source.replace(
                   old_dtype,
@@ -257,7 +454,9 @@ jobs:
               )
 
               if old_dtype in attention_source:
-                  raise RuntimeError("Tüm BF16 ayarları FP16 yapılamadı.")
+                  raise RuntimeError(
+                      "Tüm BF16 ayarları FP16 yapılamadı."
+                  )
 
               attention_file.write_text(
                   attention_source,
@@ -265,7 +464,9 @@ jobs:
               )
 
               shared_file = repo / "wan" / "configs" / "shared_config.py"
-              shared_source = shared_file.read_text(encoding="utf-8")
+              shared_source = shared_file.read_text(
+                  encoding="utf-8"
+              )
 
               replacements = [
                   (
@@ -283,7 +484,12 @@ jobs:
                       raise RuntimeError(
                           "FP16 yapılandırma satırı bulunamadı: " + old
                       )
-                  shared_source = shared_source.replace(old, new, 1)
+
+                  shared_source = shared_source.replace(
+                      old,
+                      new,
+                      1
+                  )
 
               shared_file.write_text(
                   shared_source,
@@ -304,7 +510,9 @@ jobs:
               generator = repo / "generate.py"
 
               if not generator.exists():
-                  raise RuntimeError("Wan generate.py bulunamadı.")
+                  raise RuntimeError(
+                      "Wan generate.py bulunamadı."
+                  )
 
               print("8. İsteğe bağlı prompt modülü kontrolü", flush=True)
 
@@ -342,7 +550,11 @@ jobs:
               from wan.utils.utils import cache_video
 
               cfg = WAN_CONFIGS["t2v-1.3B"]
-              print("Wan modeli bir kez yükleniyor...", flush=True)
+
+              print(
+                  "Wan modeli bir kez yükleniyor...",
+                  flush=True
+              )
 
               pipeline = wan.WanT2V(
                   config=cfg,
@@ -356,6 +568,7 @@ jobs:
               )
 
               print("Wan modeli hazır.", flush=True)
+
               generated_clips = []
 
               for index, scene in enumerate(scenes, start=1):
@@ -365,10 +578,15 @@ jobs:
                   final_prompt = (
                       f"{scene}. "
                       f"Story context: {topic}. "
+                      f"Character continuity reference: "
+                      f"{character_bible}. "
                       f"Visual style: {style}. "
-                      "Maintain visual continuity with the same story. "
-                      "Cinematic composition, natural movement, "
-                      "detailed environment, coherent action."
+                      "Maintain the same character appearance, "
+                      "clothing, facial features and environment "
+                      "throughout this story. "
+                      "Cinematic composition, natural body movement, "
+                      "coherent physical action, detailed environment, "
+                      "professional film lighting."
                   )
 
                   print(
@@ -454,10 +672,14 @@ jobs:
               ])
 
               if not final_video.exists():
-                  raise RuntimeError("Birleştirilmiş film bulunamadı.")
+                  raise RuntimeError(
+                      "Birleştirilmiş film bulunamadı."
+                  )
 
               if final_video.stat().st_size < 10000:
-                  raise RuntimeError("Final film dosyası geçersiz.")
+                  raise RuntimeError(
+                      "Final film dosyası geçersiz."
+                  )
 
               print("ÜRETİM TAMAMLANDI", flush=True)
               print("Final:", final_video, flush=True)
@@ -473,7 +695,9 @@ jobs:
 
           worker = worker.replace(
               "REQUEST_JSON = None",
-              "REQUEST_JSON = " + repr(json.dumps(request, ensure_ascii=False))
+              "REQUEST_JSON = " + repr(
+                  json.dumps(request, ensure_ascii=False)
+              )
           )
 
           Path("kaggle-worker/worker.py").write_text(
@@ -558,3 +782,4 @@ jobs:
             output/**/*.mp4
           if-no-files-found: error
           retention-days: 7
+
