@@ -68,7 +68,7 @@ def build_script_prompt(
     except (TypeError, ValueError):
         seconds = 60
 
-    scene_count = max(8, min(12, round(seconds / 6)))
+    scene_count = max(8, min(15, round(seconds / 5.0625)))
     style_description = resolve_visual_style(
         visual_style, custom_style
     )
@@ -236,8 +236,8 @@ def validate_script(data, target_seconds=60):
     if not data.get("title"):
         errors.append("Missing title.")
 
-    if not 8 <= len(scenes) <= 12:
-        warnings.append("Expected between 8 and 12 scenes.")
+    if not 8 <= len(scenes) <= 15:
+    warnings.append("Expected between 8 and 15 scenes.")
 
     characters = data.get("characters")
     character_ids = set()
