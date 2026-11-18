@@ -320,6 +320,7 @@ jobs:
           from pathlib import Path
 
           WORK = Path("/kaggle/working")
+          WAN_REPO_COMMIT = "9737cba9c1c3c4d04b33fcad41c111989865d315"
           REQUEST_JSON = None
 
           def run(command, cwd=None, timeout=None):
@@ -392,11 +393,21 @@ jobs:
               repo = WORK / "Wan2.1"
 
               if not repo.exists():
+                  run(["git", "init", str(repo)])
                   run([
-                      "git", "clone",
-                      "https://github.com/Wan-Video/Wan2.1.git",
-                      str(repo)
+                      "git", "-C", str(repo),
+                      "remote", "add", "origin",
+                      "https://github.com/Wan-Video/Wan2.1.git"
+                  ])
+                  run([
+                      "git", "-C", str(repo),
+                      "fetch", "--depth", "1",
+                      "origin", WAN_REPO_COMMIT
                   ], timeout=1800)
+                  run([
+                      "git", "-C", str(repo),
+                      "checkout", "--detach", "FETCH_HEAD"
+                  ])
 
               print("6. T4 FP16 uyumluluğu ayarlanıyor", flush=True)
 
@@ -709,6 +720,211 @@ jobs:
           print("Worker ve metadata hazır.")
           PY
 
+      - name: Worker ve Kaggle metadata ön kontrolü
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import ast
+          import json
+          from pathlib import Path
+
+          worker_path = Path("kaggle-worker/worker.py")
+          metadata_path = Path("kaggle-worker/kernel-metadata.json")
+
+          if not worker_path.is_file():
+              raise SystemExit("Worker dosyası oluşturulmadı.")
+
+          if not metadata_path.is_file():
+              raise SystemExit("Kaggle metadata dosyası oluşturulmadı.")
+
+          source = worker_path.read_text(encoding="utf-8")
+          tree = ast.parse(source, filename=str(worker_path))
+
+          request_value = None
+
+          for node in ast.walk(tree):
+              if not isinstance(node, ast.Assign):
+                  continue
+
+              if any(
+                  isinstance(target, ast.Name)
+                  and target.id == "REQUEST_JSON"
+                  for target in node.targets
+              ):
+                  request_value = ast.literal_eval(node.value)
+                  break
+
+          if not isinstance(request_value, str):
+              raise SystemExit("Worker içine film isteği gömülmemiş.")
+
+          request = json.loads(request_value)
+          metadata = json.loads(
+              metadata_path.read_text(encoding="utf-8")
+          )
+
+          required_request_fields = {
+              "topic", "prompt", "style", "character_bible", "scenes"
+          }
+
+          missing = required_request_fields - set(request)
+          if missing:
+              raise SystemExit(
+                  "Film isteğinde eksik alanlar: "
+                  + ", ".join(sorted(missing))
+              )
+
+          scenes = request["scenes"]
+          if (
+              not isinstance(scenes, list)
+              or not 1 <= len(scenes) <= 15
+              or not all(
+                  isinstance(scene, str) and scene.strip()
+                  for scene in scenes
+              )
+          ):
+              raise SystemExit("Worker sahne listesi geçersiz.")
+
+          if metadata.get("code_file") != "worker.py":
+              raise SystemExit("Kaggle code_file worker.py olmalıdır.")
+
+          if metadata.get("kernel_type") != "script":
+              raise SystemExit("Kaggle kernel_type script olmalıdır.")
+
+          if metadata.get("enable_gpu") is not True:
+              raise SystemExit("Kaggle GPU etkin değil.")
+
+          if metadata.get("machine_shape") != "NvidiaTeslaT4":
+              raise SystemExit("Beklenmeyen Kaggle GPU türü.")
+
+          compile(source, str(worker_path), "exec")
+
+          print("Worker Python sözdizimi: OK")
+          print("Film isteği JSON: OK")
+          print("Kaggle metadata: OK")
+          print("Doğrulanan sahne sayısı:", len(scenes))
+          print("GPU profili:", metadata["machine_shape"])
+          PY
+
+      - name: Wan kaynak kodu uyumluluk ön kontrolü
+        run: |
+          set -euo pipefail
+
+          WAN_REPO_COMMIT="9737cba9c1c3c4d04b33fcad41c111989865d315"
+          git init /tmp/Wan2.1
+          git -C /tmp/Wan2.1 remote add origin https://github.com/Wan-Video/Wan2.1.git
+          git -C /tmp/Wan2.1 fetch --depth 1 origin "$WAN_REPO_COMMIT"
+          git -C /tmp/Wan2.1 checkout --detach FETCH_HEAD
+          test "$(git -C /tmp/Wan2.1 rev-parse HEAD)" = "$WAN_REPO_COMMIT"
+
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          repo = Path("/tmp/Wan2.1")
+
+          model_path = repo / "wan/modules/model.py"
+          attention_path = repo / "wan/modules/attention.py"
+          shared_path = repo / "wan/configs/shared_config.py"
+          text2video_path = repo / "wan/text2video.py"
+          config_path = repo / "wan/configs/__init__.py"
+
+          model_source = model_path.read_text(encoding="utf-8")
+          attention_source = attention_path.read_text(encoding="utf-8")
+          shared_source = shared_path.read_text(encoding="utf-8")
+          config_source = config_path.read_text(encoding="utf-8")
+
+          required_fragments = {
+              "Wan model attention import":
+                  "from .attention import flash_attention",
+              "Wan model attention calls":
+                  "flash_attention(",
+              "SDPA-compatible attention function":
+                  "def attention(",
+              "FP16 conversion target":
+                  "dtype=torch.bfloat16,",
+              "T5 dtype setting":
+                  "wan_shared_cfg.t5_dtype = torch.bfloat16",
+              "DiT dtype setting":
+                  "wan_shared_cfg.param_dtype = torch.bfloat16",
+              "832x480 size preset":
+                  "'832*480': (832, 480)",
+              "1.3B text-to-video config":
+                  "'t2v-1.3B': t2v_1_3B",
+          }
+
+          sources = {
+              "Wan model attention import": model_source,
+              "Wan model attention calls": model_source,
+              "SDPA-compatible attention function": attention_source,
+              "FP16 conversion target": attention_source,
+              "T5 dtype setting": shared_source,
+              "DiT dtype setting": shared_source,
+              "832x480 size preset": config_source,
+              "1.3B text-to-video config": config_source,
+          }
+
+          for label, fragment in required_fragments.items():
+              if fragment not in sources[label]:
+                  raise SystemExit(
+                      "Wan kaynak kodu uyumsuz: " + label
+                  )
+
+          text2video_tree = ast.parse(
+              text2video_path.read_text(encoding="utf-8"),
+              filename=str(text2video_path)
+          )
+
+          wan_t2v = next(
+              node for node in text2video_tree.body
+              if isinstance(node, ast.ClassDef) and node.name == "WanT2V"
+          )
+
+          methods = {
+              node.name: node
+              for node in wan_t2v.body
+              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+          }
+
+          if not {"__init__", "generate"}.issubset(methods):
+              raise SystemExit("WanT2V constructor/generate API bulunamadı.")
+
+          def argument_names(function):
+              return {
+                  argument.arg
+                  for argument in (
+                      function.args.posonlyargs + function.args.args
+                      + function.args.kwonlyargs
+                  )
+              }
+
+          constructor_required = {
+              "config", "checkpoint_dir", "device_id", "rank",
+              "t5_fsdp", "dit_fsdp", "use_usp", "t5_cpu"
+          }
+
+          generate_required = {
+              "input_prompt", "size", "frame_num", "shift",
+              "sample_solver", "sampling_steps", "guide_scale",
+              "seed", "offload_model"
+          }
+
+          if not constructor_required.issubset(
+              argument_names(methods["__init__"])
+          ):
+              raise SystemExit("WanT2V constructor parametreleri değişmiş.")
+
+          if not generate_required.issubset(
+              argument_names(methods["generate"])
+          ):
+              raise SystemExit("WanT2V generate parametreleri değişmiş.")
+
+          print("Wan attention yama noktaları: OK")
+          print("Wan FP16 yapılandırma noktaları: OK")
+          print("Wan 832x480 / T2V 1.3B profili: OK")
+          print("WanT2V Python API: OK")
+          PY
+
       - name: Kaggle GPU görevini başlat
         run: |
           set -euo pipefail
@@ -726,16 +942,21 @@ jobs:
 
           KERNEL="${KAGGLE_USERNAME,,}/cihan-multi-scene-film-worker"
 
-          for i in $(seq 1 180); do
+          # 165 x 120 saniye = 5 saat 30 dakika.
+          # GitHub Actions'ın 6 saatlik iş sınırına pay bırakılır.
+          for i in $(seq 1 165); do
             STATUS=$(kaggle kernels status "$KERNEL" 2>&1 || true)
+            STATUS_UPPER=$(printf '%s' "$STATUS" | tr '[:lower:]' '[:upper:]')
+            echo "Kontrol $i/165"
             echo "$STATUS"
 
-            if echo "$STATUS" | grep -Eiq "COMPLETE"; then
+            # INCOMPLETE kelimesinin yanlışlıkla COMPLETE sayılmasını önle.
+            if printf '%s' "$STATUS_UPPER" | grep -Eq '(^|[^A-Z])COMPLETE([^A-Z]|$)'; then
               echo "Kaggle üretimi tamamlandı."
               exit 0
             fi
 
-            if echo "$STATUS" | grep -Eiq "ERROR|CANCELLED"; then
+            if printf '%s' "$STATUS_UPPER" | grep -Eq '(^|[^A-Z])(ERROR|CANCELLED)([^A-Z]|$)'; then
               echo "Kaggle üretimi başarısız."
               kaggle kernels logs "$KERNEL" || true
               exit 1
