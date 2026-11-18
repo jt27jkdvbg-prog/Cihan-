@@ -8,6 +8,14 @@ on:
         description: "Standart film projesi JSON (öncelikli yöntem)"
         required: false
         type: string
+      run_mode:
+        description: "Çalıştırma modu"
+        required: true
+        default: "preflight"
+        type: choice
+        options:
+          - preflight
+          - production
       konu:
         description: "Filmin konusu (eski yöntem)"
         required: false
