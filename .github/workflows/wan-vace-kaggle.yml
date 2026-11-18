@@ -330,7 +330,7 @@ jobs:
                       encoding="utf-8"
                   )
 
-                             print("9. Çok sahneli video üretimi", flush=True)
+             print("9. Çok sahneli video üretimi", flush=True)
 
               import gc
               import time
