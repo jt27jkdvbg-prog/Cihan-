@@ -721,10 +721,7 @@ jobs:
               raise
                     '''
 
-          worker = "\n".join(
-              line[10:] if line.startswith("          ") else line
-              for line in worker.splitlines()
-          ) + "\n"
+          
 
           worker = worker.replace(
               "REQUEST_JSON = None",
