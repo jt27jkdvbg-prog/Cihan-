@@ -82,6 +82,7 @@ jobs:
           VIDEO_PROMPT: ${{ inputs.prompt }}
           VIDEO_SCENES_JSON: ${{ inputs.scenes_json }}
           VIDEO_STYLE: ${{ inputs.stil }}
+          VIDEO_RUN_MODE: ${{ inputs.run_mode }}
         run: |
           set -euo pipefail
           mkdir -p kaggle-worker
@@ -93,15 +94,21 @@ jobs:
 
           from film_project import validate_film_project
 
-          owner = os.environ["KAGGLE_USERNAME"].strip().lower()
+                    run_mode = os.environ.get("VIDEO_RUN_MODE", "preflight").strip()
+          if run_mode not in {"preflight", "production"}:
+              raise ValueError("Geçersiz run_mode: " + run_mode)
+
+          owner = os.environ.get("KAGGLE_USERNAME", "").strip().lower()
+          if run_mode == "production" and not owner:
+              raise ValueError("Production için KAGGLE_USERNAME zorunludur.")
+          if not owner:
+              owner = "preflight"
+
           raw_project = os.environ.get("VIDEO_PROJECT_JSON", "").strip()
           topic_input = os.environ.get("VIDEO_TOPIC", "").strip()
           prompt_input = os.environ.get("VIDEO_PROMPT", "").strip()
           style_input = os.environ.get("VIDEO_STYLE", "").strip() or "cinematic realistic"
           raw_scenes = os.environ.get("VIDEO_SCENES_JSON", "").strip()
-
-          if not owner:
-              raise ValueError("KAGGLE_USERNAME boş olamaz.")
 
           if raw_project:
               print("Standart film projesi bulundu. JSON doğrulanıyor...")
