@@ -1,4 +1,3 @@
-
 name: Wan Multi-Scene Film Generator
 
 on:
@@ -95,6 +94,7 @@ jobs:
           from pathlib import Path
 
           from film_project import validate_film_project
+          from wan_project_input import normalize_wan_project
 
           run_mode = os.environ.get("VIDEO_RUN_MODE", "preflight").strip()
           if run_mode not in {"preflight", "production"}:
@@ -116,7 +116,7 @@ jobs:
               print("Standart film projesi bulundu. JSON doğrulanıyor...")
 
               try:
-                  project = json.loads(raw_project)
+                  project = normalize_wan_project(json.loads(raw_project))
               except json.JSONDecodeError as exc:
                   raise ValueError(
                       f"project_json geçerli JSON değil: {exc}"
@@ -721,8 +721,6 @@ jobs:
               raise
           '''
 
-          
-
           worker = worker.replace(
               "REQUEST_JSON = None",
               "REQUEST_JSON = " + repr(
@@ -943,6 +941,7 @@ jobs:
           print("Wan 832x480 / T2V 1.3B profili: OK")
           print("WanT2V Python API: OK")
           PY
+
       - name: Ön kontrol modunu tamamla
         if: ${{ inputs.run_mode == 'preflight' }}
         run: |
@@ -1031,4 +1030,6 @@ jobs:
             output/**/*.mp4
           if-no-files-found: error
           retention-days: 7
+
+        
 
