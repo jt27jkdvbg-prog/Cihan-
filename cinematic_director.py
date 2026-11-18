@@ -237,7 +237,7 @@ def validate_script(data, target_seconds=60):
         errors.append("Missing title.")
 
     if not 8 <= len(scenes) <= 15:
-    warnings.append("Expected between 8 and 15 scenes.")
+        warnings.append("Expected between 8 and 15 scenes.")
 
     characters = data.get("characters")
     character_ids = set()
