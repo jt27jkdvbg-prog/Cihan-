@@ -1,3 +1,4 @@
+
 name: Wan Multi-Scene Film Generator
 
 on:
@@ -603,7 +604,6 @@ jobs:
                   scene_started = time.perf_counter()
                   scene_file = output_dir / f"scene_{index:02d}.mp4"
 
-                  
                   final_prompt = (
                       f"{scene}. "
                       f"Main story brief and creative direction: "
@@ -619,7 +619,6 @@ jobs:
                       "coherent physical action, detailed environment, "
                       "professional film lighting."
                   )
-
 
                   print(
                       f"SAHNE {index}/{len(scenes)} ÜRETİLİYOR "
@@ -725,11 +724,47 @@ jobs:
               raise
           '''
 
+          profiler_path = Path("wan_performance.py")
+
+          if not profiler_path.is_file():
+              raise FileNotFoundError(
+                  "wan_performance.py bulunamadı."
+              )
+
+          profiler_source = profiler_path.read_text(
+              encoding="utf-8"
+          )
+
+          compile(
+              profiler_source,
+              "wan_performance.py",
+              "exec"
+          )
+
           worker = worker.replace(
               "REQUEST_JSON = None",
               "REQUEST_JSON = " + repr(
                   json.dumps(request, ensure_ascii=False)
               )
+          )
+
+          profiler_bootstrap = (
+              "\nPERFORMANCE_RECORDER_SOURCE = "
+              + repr(profiler_source)
+              + "\nexec(compile("
+              + "PERFORMANCE_RECORDER_SOURCE, "
+              + "'wan_performance.py', 'exec'), globals())\n"
+          )
+
+          if worker.count("def main():") != 1:
+              raise RuntimeError(
+                  "Worker main fonksiyonu tekil olarak bulunamadı."
+              )
+
+          worker = worker.replace(
+              "def main():",
+              profiler_bootstrap + "\ndef main():",
+              1
           )
 
           Path("kaggle-worker/worker.py").write_text(
@@ -1034,6 +1069,3 @@ jobs:
             output/**/*.mp4
           if-no-files-found: error
           retention-days: 7
-
-        
-
