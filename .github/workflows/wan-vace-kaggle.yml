@@ -948,6 +948,7 @@ jobs:
           PY
 
       - name: Kaggle GPU görevini başlat
+        if: ${{ inputs.run_mode == 'production' }}
         run: |
           set -euo pipefail
 
@@ -957,6 +958,7 @@ jobs:
             --accelerator NvidiaTeslaT4
 
       - name: Kaggle görevini takip et
+        if: ${{ inputs.run_mode == 'production' }}
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
         run: |
