@@ -52,12 +52,14 @@ jobs:
           python-version: "3.11"
 
       - name: Kaggle CLI kur
+        if: ${{ inputs.run_mode == 'production' }}
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
           pip install --upgrade kaggle six
 
       - name: Kaggle kimlik doğrulama
+        if: ${{ inputs.run_mode == 'production' }}
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
         run: |
