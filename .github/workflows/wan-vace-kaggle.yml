@@ -946,6 +946,11 @@ jobs:
           print("Wan 832x480 / T2V 1.3B profili: OK")
           print("WanT2V Python API: OK")
           PY
+      - name: Ön kontrol modunu tamamla
+        if: ${{ inputs.run_mode == 'preflight' }}
+        run: |
+          echo "Ön kontrol başarıyla tamamlandı."
+          echo "Kaggle GPU üretimi başlatılmadı."
 
       - name: Kaggle GPU görevini başlat
         if: ${{ inputs.run_mode == 'production' }}
