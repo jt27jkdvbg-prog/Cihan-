@@ -6,11 +6,13 @@ on:
     branches:
       - main
       - cinematic-pipeline-v2
+      - cinematic-pipeline-v3
 
   pull_request:
     branches:
       - main
       - cinematic-pipeline-v2
+      - cinematic-pipeline-v3
 
   workflow_dispatch:
 
@@ -44,7 +46,15 @@ jobs:
 
       - name: Python dosyalarını derleme kontrolü
         run: |
-          python -m compileall -q film_project.py generate.py camera_director.py cinematic_director.py dialogue_director.py speech_director.py quality_gate.py
+          python -m compileall -q \
+            film_project.py \
+            generate.py \
+            camera_director.py \
+            cinematic_director.py \
+            dialogue_director.py \
+            speech_director.py \
+            quality_gate.py \
+            pipeline_config.py
 
       - name: Ana testleri çalıştır
         run: python -m unittest discover -s tests -v
