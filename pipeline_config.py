@@ -367,6 +367,11 @@ class FilmProject:
 
 
 def validate_project(project: FilmProject) -> None:
+    if not isinstance(project, FilmProject):
+        raise ProjectConfigError(
+            "project must be a FilmProject instance."
+        )
+
     if project.schema_version != SCHEMA_VERSION:
         raise ProjectConfigError(
             f"Unsupported schema version: {project.schema_version}"
@@ -434,7 +439,7 @@ def load_project(source: str | Path | Mapping[str, Any]) -> FilmProject:
     """
     if isinstance(source, Mapping):
         data = source
-    else:
+    elif isinstance(source, (str, Path)):
         path = Path(source)
 
         if not path.exists():
@@ -449,6 +454,10 @@ def load_project(source: str | Path | Mapping[str, Any]) -> FilmProject:
             raise ProjectConfigError(
                 f"Invalid JSON in project file: {exc}"
             ) from exc
+    else:
+        raise ProjectConfigError(
+            "Project source must be a file path or an object."
+        )
 
     return FilmProject.from_dict(data)
 
@@ -495,9 +504,13 @@ def stable_scene_seed(
             "scene_id is required to generate a scene seed."
         )
 
-    if isinstance(base_seed, bool) or not isinstance(base_seed, int):
+    if (
+        isinstance(base_seed, bool)
+        or not isinstance(base_seed, int)
+        or base_seed < 0
+    ):
         raise ProjectConfigError(
-            "base_seed must be an integer."
+            "base_seed must be a non-negative integer."
         )
 
     raw = f"{project_id.strip()}:{scene_id.strip()}:{base_seed}"
@@ -518,3 +531,4 @@ __all__ = [
     "save_project",
     "stable_scene_seed",
 ]
+
