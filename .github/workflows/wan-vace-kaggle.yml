@@ -330,54 +330,93 @@ jobs:
                       encoding="utf-8"
                   )
 
-              print("9. Çok sahneli video üretimi", flush=True)
+                        print("9. Çok sahneli video üretimi", flush=True)
 
-              generated_clips = []
+          import gc
+          import time
+          import torch
 
-              for index, scene in enumerate(scenes, start=1):
-                  scene_file = output_dir / f"scene_{index:02d}.mp4"
+          sys.path.insert(0, str(repo))
+          import wan
+          from wan.configs import WAN_CONFIGS, SIZE_CONFIGS
+          from wan.utils.utils import cache_video
 
-                  final_prompt = (
-                      f"{scene}. "
-                      f"Story context: {topic}. "
-                      f"Visual style: {style}. "
-                      "Maintain visual continuity with the same story. "
-                      "Cinematic composition, natural movement, "
-                      "detailed environment, coherent action."
+          cfg = WAN_CONFIGS["t2v-1.3B"]
+          print("Wan modeli bir kez yükleniyor...", flush=True)
+          pipeline = wan.WanT2V(
+              config=cfg,
+              checkpoint_dir=model_dir,
+              device_id=0,
+              rank=0,
+              t5_fsdp=False,
+              dit_fsdp=False,
+              use_usp=False,
+              t5_cpu=True,
+          )
+          print("Wan modeli hazır; sahneler aynı model nesnesiyle üretilecek.", flush=True)
+
+          generated_clips = []
+
+          for index, scene in enumerate(scenes, start=1):
+              scene_started = time.perf_counter()
+              scene_file = output_dir / f"scene_{index:02d}.mp4"
+
+              final_prompt = (
+                  f"{scene}. "
+                  f"Story context: {topic}. "
+                  f"Visual style: {style}. "
+                  "Maintain visual continuity with the same story. "
+                  "Cinematic composition, natural movement, "
+                  "detailed environment, coherent action."
+              )
+
+              print(
+                  f"SAHNE {index}/{len(scenes)} ÜRETİLİYOR (81 kare / yaklaşık 5 saniye)",
+                  flush=True
+              )
+
+              video = pipeline.generate(
+                  input_prompt=final_prompt,
+                  size=SIZE_CONFIGS["832*480"],
+                  frame_num=81,
+                  shift=8,
+                  sample_solver="unipc",
+                  sampling_steps=8,
+                  guide_scale=6,
+                  seed=-1,
+                  offload_model=True,
+              )
+
+              torch.cuda.synchronize()
+              cache_video(
+                  tensor=video[None],
+                  save_file=str(scene_file),
+                  fps=cfg.sample_fps,
+                  nrow=1,
+                  normalize=True,
+                  value_range=(-1, 1),
+              )
+
+              del video
+              gc.collect()
+              torch.cuda.empty_cache()
+
+              if not scene_file.exists():
+                  raise RuntimeError(
+                      f"Sahne {index} video dosyası oluşturmadı."
                   )
 
-                  print(
-                      f"SAHNE {index}/{len(scenes)} ÜRETİLİYOR",
-                      flush=True
+              if scene_file.stat().st_size < 10000:
+                  raise RuntimeError(
+                      f"Sahne {index} video dosyası geçersiz."
                   )
 
-                  command = [
-                      sys.executable,
-                      str(generator),
-                      "--task", "t2v-1.3B",
-                      "--size", "832*480",
-                      "--frame_num", "17",
-                      "--ckpt_dir", model_dir,
-                      "--offload_model", "True",
-                      "--t5_cpu",
-                      "--prompt", final_prompt,
-                      "--sample_steps", "8",
-                      "--sample_guide_scale", "6",
-                      "--sample_shift", "8",
-                      "--save_file", str(scene_file)
-                  ]
-
-                  run(command, cwd=str(repo), timeout=20000)
-
-                  if not scene_file.exists():
-                      raise RuntimeError(
-                          f"Sahne {index} video dosyası oluşturmadı."
-                      )
-
-                  if scene_file.stat().st_size < 10000:
-                      raise RuntimeError(
-                          f"Sahne {index} video dosyası geçersiz."
-                      )
+              print(
+                  f"Sahne {index} tamamlandı | "
+                  f"{scene_file.stat().st_size} byte | "
+                  f"{time.perf_counter() - scene_started:.1f} saniye",
+                  flush=True
+              )
 
                   generated_clips.append(scene_file)
 
