@@ -94,8 +94,8 @@ jobs:
           if not isinstance(scenes, list) or not scenes:
               raise ValueError("Sahneler JSON listesi olmalıdır.")
 
-          if len(scenes) > 12:
-              raise ValueError("En fazla 12 sahne üretilebilir.")
+          if len(scenes) > 15:
+              raise ValueError("En fazla 15 sahne üretilebilir.")
 
           if not all(isinstance(s, str) and s.strip() for s in scenes):
               raise ValueError("Her sahne dolu bir metin olmalıdır.")
