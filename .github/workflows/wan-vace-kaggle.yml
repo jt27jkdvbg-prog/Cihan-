@@ -603,8 +603,11 @@ jobs:
                   scene_started = time.perf_counter()
                   scene_file = output_dir / f"scene_{index:02d}.mp4"
 
+                  
                   final_prompt = (
                       f"{scene}. "
+                      f"Main story brief and creative direction: "
+                      f"{request['prompt']}. "
                       f"Story context: {topic}. "
                       f"Character continuity reference: "
                       f"{character_bible}. "
@@ -616,6 +619,7 @@ jobs:
                       "coherent physical action, detailed environment, "
                       "professional film lighting."
                   )
+
 
                   print(
                       f"SAHNE {index}/{len(scenes)} ÜRETİLİYOR "
