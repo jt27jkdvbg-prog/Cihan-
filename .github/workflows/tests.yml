@@ -34,10 +34,13 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: FFmpeg kur
+      - name: FFmpeg kontrolü
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg fonts-dejavu-core
+          if command -v ffmpeg >/dev/null 2>&1; then
+            ffmpeg -version | head -n 1
+          else
+            echo "FFmpeg bulunamadı. Birim testleri medya kodlaması yapmadığı için devam ediliyor."
+          fi
 
       - name: Paketleri kur
         run: |
@@ -65,4 +68,3 @@ jobs:
 
       - name: Ses yönetmeni testlerini çalıştır
         run: python -m unittest test_speech_director -v
-
