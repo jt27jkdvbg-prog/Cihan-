@@ -994,6 +994,7 @@ jobs:
           exit 1
 
       - name: Film dosyalarını indir
+        if: ${{ inputs.run_mode == 'production' }}
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
         run: |
@@ -1019,6 +1020,7 @@ jobs:
           cp "$VIDEO" output/final-film.mp4
 
       - name: Film çıktısını sakla
+        if: ${{ inputs.run_mode == 'production' }}
         uses: actions/upload-artifact@v4
         with:
           name: cihan-multi-scene-film
