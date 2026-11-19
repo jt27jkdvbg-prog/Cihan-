@@ -15,13 +15,13 @@ from typing import Any, Iterator, Mapping
 from pipeline_config import FilmProject, ProjectConfigError
 
 
-ORCHESTRATOR_SCHEMA_VERSION = 1
+ORCHESTRATOR_SCHEMA_VERSION = 2
 HASH_CHUNK_SIZE = 1024 * 1024
 
 STAGES = (
-    "planning",
+    "project_validation",
     "script",
-    "visual_assets",
+    "character_assets",
     "video_generation",
     "audio_generation",
     "post_production",
@@ -30,12 +30,15 @@ STAGES = (
 )
 
 DEPENDENCIES = {
-    "planning": (),
-    "script": ("planning",),
-    "visual_assets": ("script",),
-    "video_generation": ("visual_assets",),
+    "project_validation": (),
+    "script": ("project_validation",),
+    "character_assets": ("script",),
+    "video_generation": ("character_assets",),
     "audio_generation": ("script",),
-    "post_production": ("video_generation", "audio_generation"),
+    "post_production": (
+        "video_generation",
+        "audio_generation",
+    ),
     "quality_control": ("post_production",),
     "publishing": ("quality_control",),
 }
@@ -102,7 +105,6 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
 
         os.replace(temporary, path)
 
-        # Best-effort directory sync: protects the rename on POSIX systems.
         if os.name == "posix":
             try:
                 directory_fd = os.open(
@@ -137,6 +139,7 @@ def _job_lock(path: Path) -> Iterator[None]:
 
     try:
         lock_file.seek(0, os.SEEK_END)
+
         if lock_file.tell() == 0:
             lock_file.write(b"\0")
             lock_file.flush()
@@ -173,6 +176,7 @@ def _job_lock(path: Path) -> Iterator[None]:
             yield
         finally:
             lock_file.seek(0)
+
             if os.name == "nt":
                 import msvcrt
 
@@ -221,6 +225,7 @@ class ProductionJob:
                 )
 
             now = time.time()
+
             manifest = {
                 "orchestrator_schema_version": ORCHESTRATOR_SCHEMA_VERSION,
                 "job_id": project.project_id,
@@ -257,6 +262,7 @@ class ProductionJob:
             )
 
         problems = job.verify_artifacts()
+
         if problems:
             raise OrchestrationError(
                 "Stored production artifacts failed verification: "
@@ -285,23 +291,31 @@ class ProductionJob:
             data.get("orchestrator_schema_version")
             != ORCHESTRATOR_SCHEMA_VERSION
         ):
-            raise OrchestrationError("Unsupported job manifest version.")
+            raise OrchestrationError(
+                "Unsupported job manifest version. "
+                "A version migration is required."
+            )
 
         stages = data.get("stages")
+
         if not isinstance(stages, dict) or set(stages) != set(STAGES):
             raise OrchestrationError("Job manifest stage set is invalid.")
 
         for name in STAGES:
             stage = stages[name]
+
             if not isinstance(stage, dict):
                 raise OrchestrationError(
                     f"Manifest data for stage '{name}' is invalid."
                 )
+
             if stage.get("status") not in VALID_STAGE_STATUSES:
                 raise OrchestrationError(
                     f"Invalid status for stage '{name}'."
                 )
+
             attempts = stage.get("attempts")
+
             if (
                 isinstance(attempts, bool)
                 or not isinstance(attempts, int)
@@ -310,6 +324,7 @@ class ProductionJob:
                 raise OrchestrationError(
                     f"Invalid attempt count for stage '{name}'."
                 )
+
             if not isinstance(stage.get("artifacts"), list):
                 raise OrchestrationError(
                     f"Invalid artifact list for stage '{name}'."
@@ -324,6 +339,7 @@ class ProductionJob:
             )
             FilmProject.from_dict(data)
             return data
+
         except (
             OSError,
             json.JSONDecodeError,
@@ -395,11 +411,14 @@ class ProductionJob:
 
             self._refresh_job_status(data)
             _atomic_json(self.manifest_path, data)
+
             return current["attempts"]
 
     def _resolve_artifact(self, relative: str) -> Path:
         if not isinstance(relative, str) or not relative.strip():
-            raise OrchestrationError("Artifact path must be a non-empty string.")
+            raise OrchestrationError(
+                "Artifact path must be a non-empty string."
+            )
 
         raw_path = Path(relative)
 
@@ -438,6 +457,7 @@ class ProductionJob:
                 raise OrchestrationError(
                     f"Duplicate artifact path: {relative}"
                 )
+
             seen_paths.add(normalized)
 
             if not candidate.is_file():
@@ -453,7 +473,9 @@ class ProductionJob:
                 )
 
             verified.append({
-                "path": candidate.relative_to(self.workspace).as_posix(),
+                "path": candidate.relative_to(
+                    self.workspace
+                ).as_posix(),
                 "size_bytes": size,
                 "sha256": digest,
             })
@@ -564,7 +586,11 @@ class ProductionJob:
                             f"{stage_name}: checksum mismatch {relative}"
                         )
 
-                except (KeyError, TypeError, OrchestrationError) as exc:
+                except (
+                    KeyError,
+                    TypeError,
+                    OrchestrationError,
+                ) as exc:
                     problems.append(
                         f"{stage_name}: invalid artifact record ({exc})"
                     )
