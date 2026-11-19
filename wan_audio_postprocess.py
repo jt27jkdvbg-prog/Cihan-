@@ -583,6 +583,7 @@ def build_utterances(scene, profiles):
 # AUDIO SYNTHESIS
 # ============================================================
 
+
 def synthesize_scene(
     scene,
     scene_index,
@@ -592,6 +593,9 @@ def synthesize_scene(
     subtitle_entries,
     timeline,
 ):
+    # Wan worker: 81 frames / 16 FPS
+    scene_duration = 81 / 16
+
     utterances = build_utterances(
         scene,
         profiles,
@@ -606,58 +610,76 @@ def synthesize_scene(
         profile = utterance["voice"] or {}
 
         if provider == "gemini":
-            voice = (
-                profile.get("gemini")
-                or GEMINI_VOICE
-            )
+            voice = profile.get("gemini") or GEMINI_VOICE
         elif provider == "edge":
-            voice = (
-                profile.get("edge")
-                or EDGE_VOICE
-            )
+            voice = profile.get("edge") or EDGE_VOICE
         else:
             voice = None
 
         segment_path = (
             work_dir
-            / f"scene_{scene_index:03d}_"
-              f"turn_{turn_index:03d}.mp3"
+            / f"scene_{scene_index:03d}_turn_{turn_index:03d}.mp3"
         )
 
-        function(
-            utterance["text"],
-            segment_path,
-            voice,
-            utterance["emotion"],
-            utterance["delivery"],
-            profile.get("voice_description", ""),
-        ) if provider == "gemini" else function(
-            utterance["text"],
-            segment_path,
-            voice,
-            utterance["emotion"],
-            utterance["delivery"],
-        )
+        if provider == "gemini":
+            function(
+                utterance["text"],
+                segment_path,
+                voice,
+                utterance["emotion"],
+                utterance["delivery"],
+                profile.get("voice_description", ""),
+            )
+        else:
+            function(
+                utterance["text"],
+                segment_path,
+                voice,
+                utterance["emotion"],
+                utterance["delivery"],
+            )
 
         duration = probe_duration(str(segment_path))
+
+        if duration <= 0:
+            raise RuntimeError(
+                f"Scene {scene_index + 1}: boş ses segmenti."
+            )
 
         words = estimate_word_times(
             utterance["text"],
             duration,
         )
 
+        scene_start = scene_index * scene_duration
+
         for word, start, end in words:
             subtitle_entries.append({
                 "text": word,
-                "start": timeline[0] + scene_cursor + start,
-                "end": timeline[0] + scene_cursor + end,
+                "start": scene_start + scene_cursor + start,
+                "end": scene_start + scene_cursor + end,
             })
 
         segments.append(segment_path)
         scene_cursor += duration
 
         if turn_index < len(utterances) - 1:
+            gap_path = (
+                work_dir
+                / f"scene_{scene_index:03d}_gap_{turn_index:03d}.mp3"
+            )
+
+            create_silence(gap_path, GAP_SECONDS)
+            segments.append(gap_path)
             scene_cursor += GAP_SECONDS
+
+    if scene_cursor > scene_duration:
+        raise RuntimeError(
+            f"Scene {scene_index + 1} ses süresi aşıldı: "
+            f"{scene_cursor:.2f}s / {scene_duration:.2f}s. "
+            "Konuşma kesilmedi. Sahne metnini kısaltın "
+            "veya video sahne süresini artırın."
+        )
 
     concat_file = (
         work_dir
@@ -672,9 +694,9 @@ def synthesize_scene(
         encoding="utf-8",
     )
 
-    scene_audio = (
+    raw_scene_audio = (
         work_dir
-        / f"scene_{scene_index:03d}_audio.mp3"
+        / f"scene_{scene_index:03d}_raw.mp3"
     )
 
     run([
@@ -684,10 +706,42 @@ def synthesize_scene(
         "-i", str(concat_file),
         "-c:a", "libmp3lame",
         "-b:a", "192k",
+        str(raw_scene_audio),
+    ])
+
+    actual_duration = probe_duration(
+        str(raw_scene_audio)
+    )
+
+    if actual_duration > scene_duration + 0.08:
+        raise RuntimeError(
+            f"Scene {scene_index + 1}: birleştirilmiş ses "
+            f"sahne süresini aşıyor "
+            f"({actual_duration:.2f}s)."
+        )
+
+    scene_audio = (
+        work_dir
+        / f"scene_{scene_index:03d}_audio.mp3"
+    )
+
+    run([
+        "ffmpeg", "-y",
+        "-i", str(raw_scene_audio),
+        "-af", "apad",
+        "-t", str(scene_duration),
+        "-ar", "44100",
+        "-ac", "2",
+        "-c:a", "libmp3lame",
+        "-b:a", "192k",
         str(scene_audio),
     ])
 
-    timeline[0] += probe_duration(str(scene_audio))
+    timeline[0] = (
+        (scene_index + 1) * scene_duration
+    )
+
+    return scene_audio
 
     return scene_audio
 
