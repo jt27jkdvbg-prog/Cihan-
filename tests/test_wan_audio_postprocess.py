@@ -34,23 +34,14 @@ class WanAudioPostprocessTests(unittest.TestCase):
         ]
 
     def test_timestamp_format(self):
-        self.assertEqual(
-            timestamp(65.25),
-            "00:01:05,250",
-        )
+        self.assertEqual(timestamp(65.25), "00:01:05,250")
 
     def test_clean_text(self):
-        self.assertEqual(
-            clean_text("  Merhaba dünya  "),
-            "Merhaba dünya",
-        )
+        self.assertEqual(clean_text("  Merhaba dünya  "), "Merhaba dünya")
         self.assertEqual(clean_text(None), "")
 
     def test_word_timing_is_ordered(self):
-        result = estimate_word_times(
-            "Merhaba dünya. Nasılsın?",
-            4.0,
-        )
+        result = estimate_word_times("Merhaba dünya. Nasılsın?", 4.0)
 
         self.assertEqual(len(result), 3)
 
@@ -58,10 +49,7 @@ class WanAudioPostprocessTests(unittest.TestCase):
             self.assertLess(item[1], item[2])
 
             if index > 0:
-                self.assertGreaterEqual(
-                    item[1],
-                    result[index - 1][1],
-                )
+                self.assertGreaterEqual(item[1], result[index - 1][1])
 
     def test_character_voice_profiles(self):
         profiles = build_profiles(self.characters)
@@ -69,7 +57,6 @@ class WanAudioPostprocessTests(unittest.TestCase):
         self.assertEqual(len(profiles), 2)
         self.assertIn("ali", profiles)
         self.assertIn("ayse", profiles)
-
         self.assertNotEqual(
             profiles["ali"]["gemini"],
             profiles["ayse"]["gemini"],
@@ -81,14 +68,8 @@ class WanAudioPostprocessTests(unittest.TestCase):
         scene = {
             "narration": "Gece sessizdi.",
             "dialogue_turns": [
-                {
-                    "speaker": "ali",
-                    "text": "Burada ne oldu?",
-                },
-                {
-                    "speaker": "ayse",
-                    "text": "Henüz bilmiyorum.",
-                },
+                {"speaker": "ali", "text": "Burada ne oldu?"},
+                {"speaker": "ayse", "text": "Henüz bilmiyorum."},
             ],
         }
 
@@ -106,10 +87,7 @@ class WanAudioPostprocessTests(unittest.TestCase):
             build_utterances(
                 {
                     "dialogue_turns": [
-                        {
-                            "speaker": "unknown",
-                            "text": "Merhaba",
-                        }
+                        {"speaker": "unknown", "text": "Merhaba"}
                     ]
                 },
                 profiles,
@@ -126,7 +104,6 @@ class WanAudioPostprocessTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "test.srt"
-
             write_srt(entries, path)
 
             content = path.read_text(encoding="utf-8")
@@ -158,7 +135,18 @@ class WanAudioPostprocessTests(unittest.TestCase):
                     {
                         "scene_id": f"scene_{i}",
                         "visual_subject": "Gece vakti şehir",
-                        "narration": f"Şehir sessizliğe gömülmüştü. Sahne {i}.",
+                        "image_prompt": (
+                            f"Sinema kalitesinde gece vakti şehir görüntüsü, sahne {i}."
+                        ),
+                        "motion_prompt": (
+                            f"Kamera şehir üzerinde yavaşça ilerliyor, sahne {i}."
+                        ),
+                        "sound": (
+                            f"Gece şehir ambiyansı, hafif rüzgâr, sahne {i}."
+                        ),
+                        "narration": (
+                            f"Şehir sessizliğe gömülmüştü. Sahne {i}."
+                        ),
                         "dialogue_turns": [
                             {
                                 "speaker": "ali",
@@ -176,9 +164,7 @@ class WanAudioPostprocessTests(unittest.TestCase):
         if hasattr(legacy_project, "to_dict"):
             legacy_project = legacy_project.to_dict()
 
-        modern_project = legacy_to_pipeline_project(
-            legacy_project
-        )
+        modern_project = legacy_to_pipeline_project(legacy_project)
 
         if hasattr(modern_project, "to_dict"):
             modern_project = modern_project.to_dict()
@@ -203,16 +189,10 @@ class WanAudioPostprocessTests(unittest.TestCase):
 
         normalized = normalize_wan_project(modern_project)
 
-        self.assertEqual(
-            normalized["audio"],
-            expected_audio,
-        )
-
-        self.assertEqual(
-            normalized["cost_policy"],
-            expected_cost_policy,
-        )
+        self.assertEqual(normalized["audio"], expected_audio)
+        self.assertEqual(normalized["cost_policy"], expected_cost_policy)
 
 
 if __name__ == "__main__":
     unittest.main()
+
