@@ -342,14 +342,15 @@ class WanReferencePlanTests(unittest.TestCase):
         with self.assertRaises(WanReferencePlanError):
             self.build()
 
-    def test_duplicate_scene_character_is_rejected(self):
+        def test_unknown_scene_character_is_rejected(self):
         project = make_project()
         project["scenes"][0]["character_ids"] = [
-            "hero",
-            "hero",
+            "not-in-project",
         ]
 
-        with self.assertRaises(WanReferencePlanError):
+        from pipeline_config import ProjectConfigError
+
+        with self.assertRaises(ProjectConfigError):
             build_vace_reference_plan(
                 project,
                 self.root,
