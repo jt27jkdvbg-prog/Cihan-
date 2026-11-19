@@ -5,9 +5,11 @@ import unittest
 from pathlib import Path
 
 from production_orchestrator import (
+    HASH_CHUNK_SIZE,
     OrchestrationError,
     ProductionJob,
     STAGES,
+    _job_lock,
 )
 
 
@@ -49,18 +51,18 @@ class ProductionOrchestratorTests(unittest.TestCase):
             self.project_data,
         )
 
+    def complete_stage(self, job, stage):
+        job.start_stage(stage)
+        job.complete_stage(stage)
+
     def test_job_creation_and_reopening(self):
         job = self.create_job()
-
-        reopened = ProductionJob.open(
-            self.workspace
-        )
+        reopened = ProductionJob.open(self.workspace)
 
         self.assertEqual(
             reopened.manifest["job_id"],
             "orchestrator-test-001",
         )
-
         self.assertEqual(
             reopened.project.title,
             job.project.title,
@@ -68,13 +70,9 @@ class ProductionOrchestratorTests(unittest.TestCase):
 
     def test_job_manifest_contains_all_stages(self):
         job = self.create_job()
-
         manifest = job.manifest
 
-        self.assertEqual(
-            set(manifest["stages"]),
-            set(STAGES),
-        )
+        self.assertEqual(set(manifest["stages"]), set(STAGES))
 
         for stage in STAGES:
             self.assertEqual(
@@ -118,9 +116,7 @@ class ProductionOrchestratorTests(unittest.TestCase):
 
         for stage in STAGES:
             attempt = job.start_stage(stage)
-
             self.assertEqual(attempt, 1)
-
             job.complete_stage(stage)
 
         self.assertEqual(
@@ -136,9 +132,7 @@ class ProductionOrchestratorTests(unittest.TestCase):
 
     def test_completed_stage_cannot_be_started_again(self):
         job = self.create_job()
-
-        job.start_stage("planning")
-        job.complete_stage("planning")
+        self.complete_stage(job, "planning")
 
         with self.assertRaises(OrchestrationError):
             job.start_stage("planning")
@@ -165,17 +159,13 @@ class ProductionOrchestratorTests(unittest.TestCase):
         )
 
         attempt = job.start_stage("planning")
-
         self.assertEqual(attempt, 2)
 
     def test_failed_stage_error_is_recorded(self):
         job = self.create_job()
 
         job.start_stage("planning")
-        job.fail_stage(
-            "planning",
-            "Test failure",
-        )
+        job.fail_stage("planning", "Test failure")
 
         self.assertEqual(
             job.manifest["stages"]["planning"]["error"],
@@ -197,23 +187,36 @@ class ProductionOrchestratorTests(unittest.TestCase):
             ["planning.json"],
         )
 
-        recorded = (
-            job.manifest["stages"]["planning"]["artifacts"]
-        )
+        recorded = job.manifest["stages"]["planning"]["artifacts"]
 
         self.assertEqual(len(recorded), 1)
-        self.assertEqual(
-            recorded[0]["path"],
-            "planning.json",
+        self.assertEqual(recorded[0]["path"], "planning.json")
+        self.assertEqual(job.verify_artifacts(), [])
+
+    def test_large_artifact_is_verified(self):
+        job = self.create_job()
+
+        artifact = self.workspace / "large-artifact.bin"
+        artifact.write_bytes(
+            b"x" * (HASH_CHUNK_SIZE * 3 + 123)
         )
+
+        job.start_stage("planning")
+        job.complete_stage(
+            "planning",
+            ["large-artifact.bin"],
+        )
+
+        self.assertEqual(job.verify_artifacts(), [])
+
+        record = job.manifest["stages"]["planning"]["artifacts"][0]
         self.assertEqual(
-            job.verify_artifacts(),
-            [],
+            record["size_bytes"],
+            HASH_CHUNK_SIZE * 3 + 123,
         )
 
     def test_missing_artifact_prevents_completion(self):
         job = self.create_job()
-
         job.start_stage("planning")
 
         with self.assertRaises(OrchestrationError):
@@ -256,18 +259,39 @@ class ProductionOrchestratorTests(unittest.TestCase):
             ["planning.json"],
         )
 
+        # Same length, different content: this specifically tests the hash.
         artifact.write_text(
-            '{"status": "modified"}',
+            '{"status": "other"}',
             encoding="utf-8",
         )
 
         problems = job.verify_artifacts()
 
         self.assertEqual(len(problems), 1)
-        self.assertIn(
-            "checksum mismatch",
-            problems[0],
+        self.assertIn("checksum mismatch", problems[0])
+
+    def test_open_refuses_modified_artifact(self):
+        job = self.create_job()
+
+        artifact = self.workspace / "planning.json"
+        artifact.write_text(
+            '{"status": "ready"}',
+            encoding="utf-8",
         )
+
+        job.start_stage("planning")
+        job.complete_stage(
+            "planning",
+            ["planning.json"],
+        )
+
+        artifact.write_text(
+            '{"status": "other"}',
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(OrchestrationError):
+            ProductionJob.open(self.workspace)
 
     def test_modified_project_prevents_unsafe_resume(self):
         self.create_job()
@@ -288,17 +312,48 @@ class ProductionOrchestratorTests(unittest.TestCase):
         with self.assertRaises(OrchestrationError):
             ProductionJob.open(self.workspace)
 
-    def test_existing_lock_prevents_concurrent_modification(self):
+    def test_active_lock_prevents_concurrent_modification(self):
         job = self.create_job()
 
+        with _job_lock(job.lock_path):
+            with self.assertRaises(OrchestrationError):
+                job.start_stage("planning")
+
+    def test_old_lock_file_does_not_block_new_process(self):
+        job = self.create_job()
+
+        # A lock file left on disk is not itself an active OS lock.
         job.lock_path.write_text(
-            "another-process",
+            "old process metadata",
             encoding="utf-8",
         )
 
-        with self.assertRaises(OrchestrationError):
-            job.start_stage("planning")
+        attempt = job.start_stage("planning")
+        self.assertEqual(attempt, 1)
+
+    def test_parallel_stage_status_is_preserved(self):
+        job = self.create_job()
+
+        self.complete_stage(job, "planning")
+        self.complete_stage(job, "script")
+        self.complete_stage(job, "visual_assets")
+
+        job.start_stage("video_generation")
+        job.start_stage("audio_generation")
+
+        job.fail_stage(
+            "audio_generation",
+            "Temporary audio provider failure",
+        )
+
+        self.assertEqual(job.manifest["status"], "failed")
+
+        job.retry_failed_stage("audio_generation")
+
+        # Video is still running, so retrying audio must not erase that state.
+        self.assertEqual(job.manifest["status"], "running")
 
 
 if __name__ == "__main__":
     unittest.main()
+
