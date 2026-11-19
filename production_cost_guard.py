@@ -114,7 +114,7 @@ def get_audio(project):
 def requested_services(audio):
     services = []
 
-    order = audio.get("tts_provider_order", ["gemini", "edge", "gtts", "xai"])
+    order = audio.get("tts_provider_order", ["gemini", "edge", "gtts"])
 
     if not isinstance(order, list):
         raise CostPolicyError("tts_provider_order must be a list.")
