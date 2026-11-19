@@ -5,9 +5,14 @@
 """
 Production cost guard.
 
-Checks the canonical film project's requested audio services before
-production. Free-only is the default. Unknown and paid services are
-blocked unless a separate, explicit approval policy permits them.
+Checks requested audio services and local audio assets before production.
+
+Free-only is the default.
+Unknown and paid services remain blocked.
+Local library assets are allowed only when:
+- license_verified is exactly True
+- the asset path is supplied
+- the file exists
 
 This module does not make API calls or claim live prices/quotas.
 """
@@ -43,7 +48,7 @@ SERVICE_CATALOG = {
         "category": "paid",
     },
     "licensed_library": {
-        "name": "Licensed audio library",
+        "name": "Verified local audio library",
         "category": "license_check",
     },
 }
@@ -59,14 +64,25 @@ def read_json(path):
     path = Path(path)
 
     if not path.is_file():
-        raise CostPolicyError(f"Project JSON not found: {path}")
+        raise CostPolicyError(
+            f"Project JSON not found: {path}"
+        )
 
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(
+            path.read_text(encoding="utf-8")
+        )
     except Exception as exc:
         raise CostPolicyError(
             f"Invalid project JSON: {exc}"
         ) from exc
+
+    if not isinstance(data, dict):
+        raise CostPolicyError(
+            "Project JSON root must be an object."
+        )
+
+    return data
 
 
 def normalize_policy(project):
@@ -75,20 +91,35 @@ def normalize_policy(project):
     if not isinstance(raw, dict):
         raw = {}
 
-    mode = str(raw.get("mode", "free_only")).strip().lower()
+    mode = str(
+        raw.get("mode", "free_only")
+    ).strip().lower()
 
-    if mode not in {"free_only", "approval_required", "paid_allowed"}:
-        raise CostPolicyError(f"Unsupported cost mode: {mode}")
+    if mode not in {
+        "free_only",
+        "approval_required",
+        "paid_allowed",
+    }:
+        raise CostPolicyError(
+            f"Unsupported cost mode: {mode}"
+        )
 
-    budget = raw.get("max_project_budget", 0)
+    budget = raw.get(
+        "max_project_budget",
+        0,
+    )
 
     try:
         budget = float(budget)
-    except (TypeError, ValueError):
-        raise CostPolicyError("Invalid project budget.")
+    except (TypeError, ValueError, OverflowError):
+        raise CostPolicyError(
+            "Invalid project budget."
+        )
 
     if budget < 0:
-        raise CostPolicyError("Project budget cannot be negative.")
+        raise CostPolicyError(
+            "Project budget cannot be negative."
+        )
 
     return {
         "mode": mode,
@@ -97,7 +128,9 @@ def normalize_policy(project):
         ),
         "require_approval": True,
         "block_unknown_prices": True,
-        "currency": str(raw.get("currency", "USD")).upper(),
+        "currency": str(
+            raw.get("currency", "USD")
+        ).upper(),
         "max_project_budget": budget,
     }
 
@@ -106,18 +139,32 @@ def get_audio(project):
     audio = project.get("audio", {})
 
     if not isinstance(audio, dict):
-        raise CostPolicyError("Project audio settings are invalid.")
+        raise CostPolicyError(
+            "Project audio settings are invalid."
+        )
 
     return audio
+
+
+def _is_library_provider(provider):
+    return str(provider or "").strip().lower() in {
+        "licensed_library",
+        "library",
+    }
 
 
 def requested_services(audio):
     services = []
 
-    order = audio.get("tts_provider_order", ["gemini", "edge", "gtts"])
+    order = audio.get(
+        "tts_provider_order",
+        ["gemini", "edge", "gtts"],
+    )
 
     if not isinstance(order, list):
-        raise CostPolicyError("tts_provider_order must be a list.")
+        raise CostPolicyError(
+            "tts_provider_order must be a list."
+        )
 
     for provider in order:
         provider = str(provider).strip().lower()
@@ -125,38 +172,259 @@ def requested_services(audio):
         if provider and provider not in services:
             services.append(provider)
 
-    for key, service_name in (
-        ("music", "music"),
-        ("ambience", "ambience"),
-        ("sound_effects", "sound_effects"),
+    for key in (
+        "music",
+        "ambience",
+        "sound_effects",
     ):
         setting = audio.get(key, {})
 
-        if isinstance(setting, dict) and setting.get("enabled") is True:
-            provider = str(
-                setting.get("provider", "")
-            ).strip().lower()
+        if not isinstance(setting, dict):
+            continue
 
-            if provider in {"fal", "fal-ai"}:
-                services.append("fal")
-            elif provider in {"licensed_library", "library"}:
-                services.append("licensed_library")
-            elif provider:
-                services.append(provider)
-            else:
-                services.append("unknown")
+        if setting.get("enabled") is not True:
+            continue
+
+        provider = str(
+            setting.get("provider", "")
+        ).strip().lower()
+
+        if provider in {"fal", "fal-ai"}:
+            services.append("fal")
+
+        elif _is_library_provider(provider):
+            services.append("licensed_library")
+
+        elif provider:
+            services.append(provider)
+
+        else:
+            services.append("unknown")
 
     return list(dict.fromkeys(services))
 
 
-def inspect_service(service, policy, approval, quota_confirmed):
+def _resolve_asset_path(raw_path, project_dir=None):
+    if not isinstance(raw_path, str):
+        return None
+
+    raw_path = raw_path.strip()
+
+    if not raw_path:
+        return None
+
+    path = Path(raw_path).expanduser()
+
+    if path.is_absolute():
+        return path.resolve()
+
+    candidates = []
+
+    if project_dir is not None:
+        candidates.append(
+            Path(project_dir) / path
+        )
+
+    candidates.append(
+        Path.cwd() / path
+    )
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+
+    # Return the expected location for a useful missing-file report.
+    if candidates:
+        return candidates[0].resolve()
+
+    return path.resolve()
+
+
+def _asset_record(asset, label, project_dir=None):
+    if not isinstance(asset, dict):
+        asset = {}
+
+    raw_path = (
+        asset.get("asset_path")
+        or asset.get("path")
+        or ""
+    )
+
+    resolved = _resolve_asset_path(
+        raw_path,
+        project_dir,
+    )
+
+    verified = (
+        asset.get("license_verified") is True
+    )
+
+    exists = (
+        resolved is not None
+        and resolved.is_file()
+    )
+
+    if not raw_path:
+        reason = "Asset path is missing."
+
+    elif not verified:
+        reason = (
+            "license_verified must be exactly true."
+        )
+
+    elif not exists:
+        reason = (
+            "Asset file does not exist: "
+            + str(resolved)
+        )
+
+    else:
+        reason = "License flag and local file checks passed."
+
+    return {
+        "label": label,
+        "asset_path": str(resolved) if resolved else None,
+        "license_verified": verified,
+        "file_exists": exists,
+        "valid": bool(verified and exists),
+        "reason": reason,
+    }
+
+
+def collect_library_assets(
+    project,
+    project_dir=None,
+):
+    audio = get_audio(project)
+    records = []
+
+    for key, label in (
+        ("music", "music"),
+        ("ambience", "ambience"),
+    ):
+        setting = audio.get(key, {})
+
+        if not isinstance(setting, dict):
+            continue
+
+        if setting.get("enabled") is not True:
+            continue
+
+        if not _is_library_provider(
+            setting.get("provider")
+        ):
+            continue
+
+        records.append(
+            _asset_record(
+                setting,
+                label,
+                project_dir,
+            )
+        )
+
+    effects_setting = audio.get(
+        "sound_effects",
+        {},
+    )
+
+    if (
+        isinstance(effects_setting, dict)
+        and effects_setting.get("enabled") is True
+        and _is_library_provider(
+            effects_setting.get("provider")
+        )
+    ):
+        scenes = project.get("scenes", [])
+
+        if not isinstance(scenes, list):
+            scenes = []
+
+        scene_effect_count = 0
+
+        for scene_index, scene in enumerate(
+            scenes,
+            start=1,
+        ):
+            if not isinstance(scene, dict):
+                continue
+
+            scene_effects = scene.get(
+                "sound_effects",
+                [],
+            )
+
+            if not isinstance(scene_effects, list):
+                continue
+
+            for effect_index, effect in enumerate(
+                scene_effects,
+                start=1,
+            ):
+                if not isinstance(effect, dict):
+                    continue
+
+                scene_effect_count += 1
+
+                records.append(
+                    _asset_record(
+                        effect,
+                        (
+                            f"scene_{scene_index}_"
+                            f"effect_{effect_index}"
+                        ),
+                        project_dir,
+                    )
+                )
+
+        # Also support a single shared effects asset.
+        if (
+            scene_effect_count == 0
+            and (
+                effects_setting.get("asset_path")
+                or effects_setting.get("path")
+            )
+        ):
+            records.append(
+                _asset_record(
+                    effects_setting,
+                    "shared_sound_effect",
+                    project_dir,
+                )
+            )
+
+        elif scene_effect_count == 0:
+            records.append({
+                "label": "sound_effects",
+                "asset_path": None,
+                "license_verified": False,
+                "file_exists": False,
+                "valid": False,
+                "reason": (
+                    "Sound effects are enabled, but no "
+                    "local effect assets were supplied."
+                ),
+            })
+
+    return records
+
+
+def inspect_service(
+    service,
+    policy,
+    approval,
+    quota_confirmed,
+    library_assets=None,
+):
     info = SERVICE_CATALOG.get(service)
 
     if info is None:
         return {
             "service": service,
             "status": "BLOCKED",
-            "reason": "Unknown provider or unknown pricing.",
+            "reason": (
+                "Unknown provider or unknown pricing."
+            ),
         }
 
     category = info["category"]
@@ -165,7 +433,10 @@ def inspect_service(service, policy, approval, quota_confirmed):
         return {
             "service": info["name"],
             "status": "ALLOWED",
-            "reason": "Classified as free; service availability is not guaranteed.",
+            "reason": (
+                "Classified as free; service availability "
+                "is not guaranteed."
+            ),
         }
 
     if category == "free_quota":
@@ -175,24 +446,58 @@ def inspect_service(service, policy, approval, quota_confirmed):
                 "status": "BLOCKED",
                 "reason": (
                     "Free quota/billing status is not confirmed. "
-                    "Use another free provider or verify the account separately."
+                    "Use another free provider or verify the "
+                    "account separately."
                 ),
             }
 
         return {
             "service": info["name"],
             "status": "ALLOWED",
-            "reason": "Free quota explicitly confirmed by workflow setting.",
+            "reason": (
+                "Free quota explicitly confirmed by workflow setting."
+            ),
         }
 
     if category == "license_check":
+        assets = library_assets or []
+
+        if not assets:
+            return {
+                "service": info["name"],
+                "status": "BLOCKED",
+                "reason": (
+                    "No local audio assets were supplied for "
+                    "license and file validation."
+                ),
+            }
+
+        invalid = [
+            asset for asset in assets
+            if not asset.get("valid")
+        ]
+
+        if invalid:
+            return {
+                "service": info["name"],
+                "status": "BLOCKED",
+                "reason": (
+                    f"{len(invalid)} of {len(assets)} local "
+                    "audio asset(s) failed validation. "
+                    "Check license_verified and asset_path."
+                ),
+                "assets_checked": len(assets),
+                "invalid_assets": invalid,
+            }
+
         return {
             "service": info["name"],
-            "status": "BLOCKED",
+            "status": "ALLOWED",
             "reason": (
-                "Asset license must be verified before use. "
-                "No license evidence was supplied to this checker."
+                "All supplied local audio assets have "
+                "license_verified=true and existing files."
             ),
+            "assets_checked": len(assets),
         }
 
     if category == "paid":
@@ -200,29 +505,35 @@ def inspect_service(service, policy, approval, quota_confirmed):
             return {
                 "service": info["name"],
                 "status": "BLOCKED",
-                "reason": "Paid services are disabled in free-only mode.",
+                "reason": (
+                    "Paid services are disabled in free-only mode."
+                ),
             }
 
         if not policy["paid_services_allowed"]:
             return {
                 "service": info["name"],
                 "status": "BLOCKED",
-                "reason": "Project policy does not allow paid services.",
+                "reason": (
+                    "Project policy does not allow paid services."
+                ),
             }
 
         if not approval:
             return {
                 "service": info["name"],
                 "status": "BLOCKED",
-                "reason": "Explicit workflow approval is missing.",
+                "reason": (
+                    "Explicit workflow approval is missing."
+                ),
             }
 
         return {
             "service": info["name"],
             "status": "BLOCKED",
             "reason": (
-                "Live price is not verified. Unknown prices are blocked; "
-                "no paid API call may start."
+                "Live price is not verified. Unknown prices are "
+                "blocked; no paid API call may start."
             ),
         }
 
@@ -233,20 +544,34 @@ def inspect_service(service, policy, approval, quota_confirmed):
     }
 
 
-def build_report(project, approval=False, quota_confirmed=False):
+def build_report(
+    project,
+    approval=False,
+    quota_confirmed=False,
+    project_dir=None,
+):
     policy = normalize_policy(project)
     audio = get_audio(project)
 
     services = requested_services(audio)
-    results = [
-        inspect_service(
-            service,
-            policy,
-            approval,
-            quota_confirmed,
+
+    library_assets = collect_library_assets(
+        project,
+        project_dir=project_dir,
+    )
+
+    results = []
+
+    for service in services:
+        results.append(
+            inspect_service(
+                service,
+                policy,
+                approval,
+                quota_confirmed,
+                library_assets=library_assets,
+            )
         )
-        for service in services
-    ]
 
     blocked = [
         item for item in results
@@ -254,11 +579,15 @@ def build_report(project, approval=False, quota_confirmed=False):
     ]
 
     return {
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(
+            timezone.utc
+        ).isoformat(),
         "mode": policy["mode"],
         "currency": policy["currency"],
         "budget_limit": policy["max_project_budget"],
-        "paid_services_allowed": policy["paid_services_allowed"],
+        "paid_services_allowed": (
+            policy["paid_services_allowed"]
+        ),
         "explicit_workflow_approval": bool(approval),
         "estimated_cost": None,
         "actual_cost": None,
@@ -266,6 +595,7 @@ def build_report(project, approval=False, quota_confirmed=False):
             "No live price or billing API was queried. "
             "Costs are not estimated or invented."
         ),
+        "library_assets": library_assets,
         "services": results,
         "production_allowed": len(blocked) == 0,
         "blocked_count": len(blocked),
@@ -274,48 +604,78 @@ def build_report(project, approval=False, quota_confirmed=False):
 
 def main():
     parser = argparse.ArgumentParser()
+
     parser.add_argument(
         "--project",
         default=".work/project.json",
     )
+
     parser.add_argument(
         "--report",
         default="output/cost_report.json",
     )
+
     args = parser.parse_args()
 
     approval = (
-        os.environ.get("PAID_SERVICES_APPROVED", "").lower()
-        == "true"
+        os.environ.get(
+            "PAID_SERVICES_APPROVED",
+            "",
+        ).lower() == "true"
     )
+
     quota_confirmed = (
-        os.environ.get("GEMINI_TTS_FREE_QUOTA_CONFIRMED", "").lower()
-        == "true"
+        os.environ.get(
+            "GEMINI_TTS_FREE_QUOTA_CONFIRMED",
+            "",
+        ).lower() == "true"
     )
 
     try:
-        project = read_json(args.project)
+        project_path = Path(args.project).resolve()
+
+        project = read_json(project_path)
+
         report = build_report(
             project,
             approval=approval,
             quota_confirmed=quota_confirmed,
+            project_dir=project_path.parent,
         )
 
         report_path = Path(args.report)
-        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
         report_path.write_text(
-            json.dumps(report, ensure_ascii=False, indent=2),
+            json.dumps(
+                report,
+                ensure_ascii=False,
+                indent=2,
+            ),
             encoding="utf-8",
         )
 
         print("COST PREFLIGHT")
         print("Mode:", report["mode"])
-        print("Production allowed:", report["production_allowed"])
+        print(
+            "Production allowed:",
+            report["production_allowed"],
+        )
 
         for item in report["services"]:
             print(
-                f'{item["status"]}: {item["service"]} - '
+                f'{item["status"]}: '
+                f'{item["service"]} - '
                 f'{item["reason"]}'
+            )
+
+        for asset in report["library_assets"]:
+            print(
+                f'ASSET {"OK" if asset["valid"] else "BLOCKED"}: '
+                f'{asset["label"]} - {asset["reason"]}'
             )
 
         print("Report:", report_path)
@@ -327,9 +687,13 @@ def main():
             )
 
     except Exception as exc:
-        print(f"COST GUARD FAILED: {exc}", file=sys.stderr)
+        print(
+            f"COST GUARD FAILED: {exc}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
 
 if __name__ == "__main__":
     main()
+
