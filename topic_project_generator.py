@@ -1,12 +1,12 @@
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Topic-only film project generation with automatic LLM provider fallback."""
+"""Generate a complete validated film project from topic-only input."""
 
 import json
 import os
 import re
-import time
 import urllib.error
 import urllib.request
 
@@ -17,7 +17,7 @@ def log(message):
     print(f"[LLM] {message}", flush=True)
 
 
-def request_json(url, headers, payload, timeout=150):
+def request_json(url, headers, payload, timeout=180):
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
         url,
@@ -31,7 +31,7 @@ def request_json(url, headers, payload, timeout=150):
             return json.loads(response.read().decode("utf-8"))
 
     except urllib.error.HTTPError as exc:
-        details = exc.read(1800).decode("utf-8", errors="replace")
+        details = exc.read(2000).decode("utf-8", errors="replace")
         raise RuntimeError(
             f"HTTP {exc.code}: {details[:1200]}"
         ) from exc
@@ -58,6 +58,7 @@ def extract_openai_text(data):
         )
 
     content = str(content or "").strip()
+
     if not content:
         raise ValueError("Model boş yanıt döndürdü.")
 
@@ -88,8 +89,9 @@ def call_openrouter(prompt):
                 {
                     "role": "system",
                     "content": (
-                        "You are a professional screenwriter and film director. "
-                        "Return only valid JSON. Never use Markdown fences."
+                        "You are a professional screenwriter, film director "
+                        "and cinematic continuity supervisor. Return only "
+                        "valid JSON. Never use Markdown fences."
                     ),
                 },
                 {"role": "user", "content": prompt},
@@ -124,8 +126,9 @@ def call_groq(prompt):
                 {
                     "role": "system",
                     "content": (
-                        "You are a professional screenwriter and film director. "
-                        "Return only valid JSON. Never use Markdown fences."
+                        "You are a professional screenwriter, film director "
+                        "and cinematic continuity supervisor. Return only "
+                        "valid JSON. Never use Markdown fences."
                     ),
                 },
                 {"role": "user", "content": prompt},
@@ -151,13 +154,15 @@ def call_gemini(prompt):
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         + model
-        + ":generateContent?key="
-        + key
+        + ":generateContent"
     )
 
     data = request_json(
         url,
-        {"Content-Type": "application/json"},
+        {
+            "Content-Type": "application/json",
+            "x-goog-api-key": key,
+        },
         {
             "contents": [
                 {
@@ -202,32 +207,42 @@ PROVIDERS = {
 }
 
 
-def generate_text(prompt):
-    order = os.environ.get(
+def provider_order():
+    raw = os.environ.get(
         "LLM_PROVIDER_ORDER",
         "openrouter,groq,gemini",
     )
 
-    providers = [
-        item.strip().lower()
-        for item in order.split(",")
-        if item.strip().lower() in PROVIDERS
-    ]
+    result = []
+    for item in raw.split(","):
+        name = item.strip().lower()
+        if name in PROVIDERS and name not in result:
+            result.append(name)
 
+    return result
+
+
+def generate_text(prompt):
     errors = []
 
-    for provider in providers:
+    for provider in provider_order():
         try:
             log(f"{provider} deneniyor...")
             result = PROVIDERS[provider](prompt)
+
+            if not result or not result.strip():
+                raise ValueError("Sağlayıcı boş yanıt döndürdü.")
+
             log(f"Başarılı sağlayıcı: {provider}")
             return result, provider
 
         except Exception as exc:
             message = str(exc)
-            errors.append(f"{provider}: {message[:500]}")
-            log(f"{provider} başarısız; sıradaki sağlayıcıya geçiliyor.")
-            log(message[:350])
+            errors.append(
+                f"{provider}: {message[:500]}"
+            )
+            log(f"{provider} başarısız; sonraki sağlayıcı deneniyor.")
+            log(message[:300])
 
     raise RuntimeError(
         "Hiçbir yapay zekâ sağlayıcısı yanıt veremedi.\n"
@@ -237,28 +252,118 @@ def generate_text(prompt):
 
 def extract_json(raw):
     raw = str(raw or "").strip()
-    raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.I)
-    raw = re.sub(r"\s*```$", "", raw)
+
+    raw = re.sub(
+        r"^\s*```(?:json)?\s*",
+        "",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    raw = re.sub(r"\s*```\s*$", "", raw)
 
     start = raw.find("{")
-    end = raw.rfind("}")
-
-    if start < 0 or end <= start:
+    if start < 0:
         raise ValueError("Model yanıtında JSON nesnesi bulunamadı.")
 
-    return json.loads(raw[start:end + 1])
+    depth = 0
+    in_string = False
+    escaped = False
+
+    for index in range(start, len(raw)):
+        char = raw[index]
+
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+
+            if depth == 0:
+                candidate = raw[start:index + 1]
+                return json.loads(candidate)
+
+    raise ValueError("Model yanıtındaki JSON tamamlanmamış.")
 
 
 def build_prompt(topic, style, language, seconds):
     scene_count = max(8, min(15, round(seconds / 6)))
 
+    template = {
+        "title": "Film title",
+        "description": "Film description",
+        "style": style,
+        "character_bible": "Detailed visual continuity guide",
+        "tags": [],
+        "characters": [
+            {
+                "id": "character_1",
+                "name": "Character name",
+                "description": "Detailed fixed appearance, face, hair and clothing",
+                "personality": "Personality and motivation",
+                "voice": "Distinct voice description",
+                "voice_gender": "male",
+                "voice_profile": {
+                    "edge": "",
+                    "gemini": "",
+                },
+            },
+            {
+                "id": "character_2",
+                "name": "Second character",
+                "description": "Detailed fixed appearance and clothing",
+                "personality": "Personality and motivation",
+                "voice": "Distinct voice description",
+                "voice_gender": "female",
+                "voice_profile": {
+                    "edge": "",
+                    "gemini": "",
+                },
+            },
+        ],
+        "scenes": [
+            {
+                "scene_id": "scene_01",
+                "narration": "",
+                "visual_subject": "Visible subjects",
+                "action": "Specific physical action",
+                "location": "Detailed location",
+                "props": "Important objects",
+                "camera": "Shot framing and camera movement",
+                "image_prompt": "Detailed cinematic first-frame image prompt",
+                "motion_prompt": "Specific continuous physical movement",
+                "sound": "Ambience and sound effects",
+                "dialogue_turns": [
+                    {
+                        "speaker": "character_1",
+                        "text": "Natural dialogue in the requested language",
+                        "emotion": "neutral",
+                        "delivery": "natural",
+                        "listener_ids": ["character_2"],
+                    }
+                ],
+                "shot_plan": [],
+                "transition": "Transition to next scene",
+            }
+        ],
+    }
+
     return f"""
-You are a professional film director, screenwriter,
-cinematographer and character-continuity supervisor.
+You are an award-winning professional film director,
+screenwriter, cinematographer and continuity supervisor.
 
-Create a complete, original short-film project.
+Create a complete original cinematic short film.
 
-TOPIC:
+FILM TOPIC:
 {topic}
 
 LANGUAGE:
@@ -270,139 +375,174 @@ VISUAL STYLE:
 TARGET DURATION:
 {seconds} seconds.
 
-SCENES:
-Create exactly {scene_count} scenes.
-Never create fewer than 8 or more than 15 scenes.
+EXACT SCENE COUNT:
+{scene_count}
 
-Return ONLY one valid JSON object with this structure:
+Return exactly one valid JSON object matching this structure.
+The example arrays show the required object fields; expand them
+to the required number of characters and scenes.
 
-{{
-  "title": "Film title",
-  "description": "Short film description",
-  "style": "{style}",
-  "character_bible": "Detailed visual continuity guide",
-  "characters": [
-    {{
-      "id": "character_1",
-      "name": "Character name",
-      "description": "Detailed fixed appearance, face, hair and clothing",
-      "personality": "Personality and motivation",
-      "voice": "Distinct voice description",
-      "voice_gender": "male"
-    }}
-  ],
-  "scenes": [
-    {{
-      "scene_id": "scene_01",
-      "narration": "",
-      "visual_subject": "Visible subjects",
-      "action": "Specific physical action",
-      "location": "Detailed location",
-      "props": "Important objects",
-      "camera": "Shot framing and camera movement",
-      "image_prompt": "Detailed cinematic first-frame image prompt",
-      "motion_prompt": "Specific continuous physical movement",
-      "sound": "Ambience and sound effects",
-      "dialogue_turns": [
-        {{
-          "speaker": "character_1",
-          "text": "Natural dialogue in the requested language",
-          "emotion": "neutral",
-          "delivery": "natural",
-          "listener_ids": ["character_2"]
-        }}
-      ],
-      "shot_plan": [],
-      "transition": "Transition to next scene"
-    }}
-  ]
-}}
+STRUCTURE:
+{json.dumps(template, ensure_ascii=False, indent=2)}
 
-MANDATORY QUALITY RULES:
+MANDATORY RULES:
 
-- Create 2 to 8 recurring characters.
-- Every character must have a unique ID and name.
-- Keep faces, hair, clothing and proportions consistent.
-- Every scene needs image_prompt, motion_prompt and sound.
-- Every scene needs narration or dialogue.
-- Include meaningful character dialogue in at least one scene.
-- Every dialogue speaker must use an existing character ID.
-- Make every scene advance the story.
-- Use cinematic shot variety, meaningful camera movement,
-  clear physical actions and coherent screen geography.
-- Make the opening engaging and the ending satisfying.
-- Use landscape 26:15 composition for every scene.
-- Do not create generic filler scenes.
-- Do not copy existing films, scripts or copyrighted characters.
-- Avoid graphic violence and explicit sexual content.
-- Do not invent factual claims about real people or historical events.
-- Return JSON only. No Markdown, no explanations.
+1. Create 2 to 8 recurring characters.
+2. Create exactly {scene_count} scenes.
+3. Every character must have a unique ID and name.
+4. Character faces, hair, clothing, age appearance and proportions
+   must remain visually consistent across all scenes.
+5. Every scene must contain image_prompt, motion_prompt and sound.
+6. Every scene must contain narration or dialogue.
+7. Include meaningful character dialogue in at least one scene.
+8. Every dialogue speaker must match an existing character ID.
+9. Use the requested language for narration and dialogue.
+10. Each scene must advance the story.
+11. Use cinematic shot variety and coherent screen geography.
+12. Specify camera framing, movement, lighting and atmosphere.
+13. Opening must engage the viewer; ending must feel complete.
+14. Compose every scene for landscape 26:15 framing.
+15. Do not create generic filler scenes.
+16. Do not copy existing films, scripts or copyrighted characters.
+17. Avoid graphic violence and explicit sexual content.
+18. Return JSON only. No Markdown or explanations.
+
+The JSON must be complete and valid. Do not truncate it.
 """.strip()
 
 
 def generate_project(topic, style="cinematic realistic"):
     topic = str(topic or "").strip()
+
     if not topic:
         raise ValueError("Film konusu boş olamaz.")
 
-    language = os.environ.get("VIDEO_LANGUAGE", "Turkish").strip()
+    language = (
+        os.environ.get("VIDEO_LANGUAGE", "Turkish").strip()
+        or "Turkish"
+    )
+
     try:
-        seconds = int(os.environ.get("TARGET_SECONDS", "60"))
-    except ValueError:
+        seconds = int(
+            os.environ.get("TARGET_SECONDS", "60")
+        )
+    except (TypeError, ValueError):
         seconds = 60
 
     seconds = max(15, min(seconds, 180))
     style = str(style or "cinematic realistic").strip()
 
-    prompt = build_prompt(topic, style, language, seconds)
+    if not style:
+        style = "cinematic realistic"
 
-    raw, provider = generate_text(prompt)
-    script = extract_json(raw)
-
-    try:
-        project = build_film_project(
-            script,
-            topic=topic,
-            target_seconds=seconds,
-            language=language,
-            visual_style=style,
-        )
-    except Exception as first_error:
-        log("İlk proje doğrulamadan geçmedi; bir kez düzeltiliyor.")
-
-        repair_prompt = (
-            prompt
-            + "\n\nFIX THIS JSON. Correct every schema or validation "
-            "problem listed below. Preserve the story and return the "
-            "complete corrected JSON only.\n\n"
-            + "VALIDATION ERROR:\n"
-            + str(first_error)[:5000]
-            + "\n\nINVALID JSON:\n"
-            + json.dumps(script, ensure_ascii=False)[:18000]
-        )
-
-        repaired_raw, repair_provider = generate_text(repair_prompt)
-        repaired_script = extract_json(repaired_raw)
-
-        project = build_film_project(
-            repaired_script,
-            topic=topic,
-            target_seconds=seconds,
-            language=language,
-            visual_style=style,
-        )
-
-        provider = repair_provider
-
-    log(
-        "Proje hazır: "
-        + str(project["film"]["title"])
-        + " | sahne: "
-        + str(len(project["scenes"]))
-        + " | karakter: "
-        + str(len(project["characters"]))
-        + " | sağlayıcı: "
-        + provider
+    original_prompt = build_prompt(
+        topic,
+        style,
+        language,
+        seconds,
     )
 
-    return project
+    current_prompt = original_prompt
+    last_error = None
+    last_raw = ""
+    selected_provider = "unknown"
+
+    # İlk üretim + en fazla iki otomatik düzeltme.
+    for attempt in range(1, 4):
+        log(f"Film projesi üretimi: deneme {attempt}/3")
+
+        try:
+            raw, provider = generate_text(current_prompt)
+            last_raw = raw
+            selected_provider = provider
+
+            script = extract_json(raw)
+
+            project = build_film_project(
+                script,
+                topic=topic,
+                target_seconds=seconds,
+                language=language,
+                visual_style=style,
+            )
+
+            log(
+                "Proje doğrulandı: "
+                + str(project["film"]["title"])
+                + " | sahne: "
+                + str(len(project["scenes"]))
+                + " | karakter: "
+                + str(len(project["characters"]))
+                + " | sağlayıcı: "
+                + provider
+            )
+
+            return project
+
+        except Exception as exc:
+            last_error = exc
+            log(
+                f"Deneme {attempt} başarısız: "
+                f"{type(exc).__name__}: {str(exc)[:700]}"
+            )
+
+            if attempt >= 3:
+                break
+
+            current_prompt = (
+                original_prompt
+                + "\n\nIMPORTANT: Your previous response failed "
+                "JSON parsing or project validation.\n"
+                + "Correct the complete project and return valid JSON only.\n"
+                + "ERROR:\n"
+                + str(exc)[:5000]
+                + "\n\nPREVIOUS RESPONSE:\n"
+                + last_raw[:16000]
+            )
+
+    raise RuntimeError(
+        "Film projesi üç denemede de oluşturulamadı. "
+        "Son hata: "
+        + str(last_error)
+    )
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Generate a film project from a topic."
+    )
+    parser.add_argument("--topic", required=True)
+    parser.add_argument(
+        "--style",
+        default="cinematic realistic",
+    )
+    parser.add_argument(
+        "--output",
+        default=".work/project.json",
+    )
+
+    args = parser.parse_args()
+
+    project = generate_project(
+        args.topic,
+        args.style,
+    )
+
+    output_path = os.path.abspath(args.output)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    with open(output_path, "w", encoding="utf-8") as file:
+        json.dump(
+            project,
+            file,
+            ensure_ascii=False,
+            indent=2,
+        )
+        file.write("\n")
+
+    print("PROJECT_OUTPUT=" + output_path)
+    print("PROJECT_TITLE=" + project["film"]["title"])
+    print("SCENE_COUNT=" + str(len(project["scenes"])))
+    print("CHARACTER_COUNT=" + str(len(project["characters"])))
