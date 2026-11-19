@@ -1314,10 +1314,11 @@ jobs:
         if: ${{ inputs.run_mode == 'production' }}
         env:
           GEMINI_TTS_FREE_QUOTA_CONFIRMED: ${{ inputs.gemini_tts_free_quota_confirmed }}
+          VIDEO_PROJECT_JSON: ${{ inputs.project_json }}
         run: |
           set -euo pipefail
 
-          if [ -z "${{ inputs.project_json }}" ]; then
+          if [ -z "${VIDEO_PROJECT_JSON}" ]; then
             echo "Eski konu/prompt giriş yöntemi kullanılıyor."
             echo "Bu yöntemde standart project.json bulunmadığından"
             echo "ses servisleri için maliyet kontrolü çalıştırılmadı."
