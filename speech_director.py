@@ -12,7 +12,12 @@ GEMINI_VOICES = [
     "Zephyr",
 ]
 
-DEFAULT_TTS_ORDER = ["xai", "gemini", "edge", "gtts"]
+# Ücretsiz seçenekler önce gelir.
+# Ücretli xAI otomatik olarak devreye sokulmamalıdır.
+DEFAULT_TTS_ORDER = ["gemini", "edge", "gtts", "xai"]
+
+FREE_TTS_PROVIDERS = ["gemini", "edge", "gtts"]
+PAID_TTS_PROVIDERS = ["xai"]
 
 
 def _clean(value, default=""):
@@ -64,6 +69,11 @@ def build_voice_profiles(characters):
             GEMINI_VOICES[index % len(GEMINI_VOICES)],
         )
 
+        if gemini_voice not in GEMINI_VOICES:
+            raise ValueError(
+                f"Unsupported Gemini voice for {name}: {gemini_voice}"
+            )
+
         if gemini_voice in used_gemini_voices:
             raise ValueError(
                 f"Duplicate Gemini voice assigned to {name}."
@@ -71,16 +81,40 @@ def build_voice_profiles(characters):
 
         used_gemini_voices.add(gemini_voice)
 
+        custom_order = voice.get("provider_order")
+
+        if isinstance(custom_order, list):
+            requested = [
+                _clean(item).lower()
+                for item in custom_order
+                if _clean(item)
+            ]
+
+            # Karakter ayarları ücretsiz önceliği bozamaz.
+            provider_order = [
+                item for item in FREE_TTS_PROVIDERS
+                if item in requested
+            ]
+
+            provider_order.extend(
+                item for item in FREE_TTS_PROVIDERS
+                if item not in provider_order
+            )
+
+            # xAI yalnızca listenin sonunda tutulur.
+            if "xai" in requested:
+                provider_order.append("xai")
+        else:
+            provider_order = list(DEFAULT_TTS_ORDER)
+
         profiles[character_id] = {
             "character_id": character_id,
             "name": name,
 
-            # Provider-specific stable voice identifiers.
             "xai": _clean(voice.get("xai")),
             "gemini": gemini_voice,
             "edge": _clean(voice.get("edge"), edge_default),
 
-            # Optional narration/voice direction metadata.
             "personality": _clean(
                 character.get("personality")
             ),
@@ -89,8 +123,10 @@ def build_voice_profiles(characters):
             ),
             "voice_gender": gender,
 
-            # Keep provider preferences attached to the character.
-            "provider_order": list(DEFAULT_TTS_ORDER),
+            "provider_order": provider_order,
+            "free_providers": list(FREE_TTS_PROVIDERS),
+            "paid_providers": list(PAID_TTS_PROVIDERS),
+            "paid_provider_requires_approval": True,
         }
 
     return profiles
@@ -135,8 +171,10 @@ def build_speech_schedule(scenes, characters):
                 raise ValueError("listener_ids must be a list.")
 
             listeners = []
+
             for listener in raw_listeners:
                 listener_id = _clean(listener)
+
                 if (
                     listener_id in profiles
                     and listener_id != speaker
@@ -164,3 +202,4 @@ def build_speech_schedule(scenes, characters):
         raise ValueError("The film contains no character dialogue.")
 
     return schedule
+
