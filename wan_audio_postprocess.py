@@ -2,22 +2,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Wan film audio post-processor.
-
-Free-first Turkish TTS:
-1. Gemini TTS (only with explicit free-quota confirmation)
-2. Edge TTS
-3. gTTS
-
-Creates:
-- Dialogue and narration audio
-- SRT subtitles
-- Final MP4 with audio
-- Runtime audio report
-
-Paid providers are never called by this module.
-"""
+"""Wan film audio post-processor: free-first TTS and licensed audio mixing."""
 
 import argparse
 import asyncio
@@ -27,48 +12,30 @@ import re
 import shutil
 import subprocess
 import sys
-import wave
-
 from pathlib import Path
 
+from audio_asset_mixer import mix_audio_layers, write_mix_report
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
 
 GEMINI_MODEL = os.getenv(
     "GEMINI_TTS_MODEL",
     "gemini-2.5-flash-preview-tts",
 )
-
 GEMINI_STYLE = os.getenv(
     "GEMINI_TTS_STYLE",
-    "Speak naturally in Turkish with clear pronunciation "
-    "and cinematic pacing.",
+    "Speak naturally in Turkish with clear pronunciation and cinematic pacing.",
 )
-
 GEMINI_QUOTA_CONFIRMED = (
-    os.getenv(
-        "GEMINI_TTS_FREE_QUOTA_CONFIRMED",
-        "false",
-    ).lower() == "true"
+    os.getenv("GEMINI_TTS_FREE_QUOTA_CONFIRMED", "false").lower()
+    == "true"
 )
-
 GEMINI_VOICE = os.getenv("GEMINI_VOICE", "Charon")
-
-EDGE_VOICE = os.getenv(
-    "EDGE_VOICE",
-    "tr-TR-AhmetNeural",
-)
-
-EDGE_FEMALE_VOICE = os.getenv(
-    "EDGE_FEMALE_VOICE",
-    "tr-TR-EmelNeural",
-)
-
+EDGE_VOICE = os.getenv("EDGE_VOICE", "tr-TR-AhmetNeural")
+EDGE_FEMALE_VOICE = os.getenv("EDGE_FEMALE_VOICE", "tr-TR-EmelNeural")
 GTTS_LANG = os.getenv("GTTS_LANG", "tr")
 
 GAP_SECONDS = 0.12
+SCENE_DURATION = 81 / 16
 
 REPORT = {
     "status": "starting",
@@ -84,54 +51,38 @@ REPORT = {
     "video_duration_seconds": None,
     "subtitle_file": None,
     "output_file": None,
+    "mix_report_file": None,
+    "mix_layers": [],
     "notes": [],
 }
 
 
-# ============================================================
-# UTILITIES
-# ============================================================
-
 def run(command):
-    result = subprocess.run(
-        [str(x) for x in command],
+    return subprocess.run(
+        [str(item) for item in command],
         check=True,
         capture_output=True,
         text=True,
     )
-    return result
 
 
 def require_binary(name):
     if shutil.which(name) is None:
-        raise RuntimeError(
-            f"Gerekli program bulunamadı: {name}"
-        )
+        raise RuntimeError(f"Gerekli program bulunamadı: {name}")
 
 
 def read_json(path):
     path = Path(path)
-
     if not path.is_file():
-        raise RuntimeError(
-            f"Proje JSON bulunamadı: {path}"
-        )
-
-    return json.loads(
-        path.read_text(encoding="utf-8")
-    )
+        raise RuntimeError(f"Proje JSON bulunamadı: {path}")
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def write_json(path, data):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-
     path.write_text(
-        json.dumps(
-            data,
-            ensure_ascii=False,
-            indent=2,
-        ),
+        json.dumps(data, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
@@ -142,38 +93,26 @@ def probe_duration(path):
         "-v", "error",
         "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1",
-        path,
+        str(path),
     ])
-
     duration = float(result.stdout.strip())
-
     if duration <= 0:
-        raise RuntimeError(
-            f"Geçersiz medya süresi: {path}"
-        )
-
+        raise RuntimeError(f"Geçersiz medya süresi: {path}")
     return duration
 
 
 def clean_text(value):
-    if value is None:
-        return ""
-
-    return str(value).strip()
+    return "" if value is None else str(value).strip()
 
 
 def timestamp(seconds):
     milliseconds = int(round(seconds * 1000))
-
     hours = milliseconds // 3600000
     milliseconds %= 3600000
-
     minutes = milliseconds // 60000
     milliseconds %= 60000
-
     secs = milliseconds // 1000
     milliseconds %= 1000
-
     return (
         f"{hours:02d}:{minutes:02d}:"
         f"{secs:02d},{milliseconds:03d}"
@@ -182,37 +121,26 @@ def timestamp(seconds):
 
 def estimate_word_times(text, duration):
     words = clean_text(text).split()
-
     if not words:
         return []
 
     weights = []
-
     for word in words:
         weight = len(word) + 1
-
         if re.search(r"[.!?…]$", word):
             weight += 5
         elif re.search(r"[,;:]$", word):
             weight += 2
-
         weights.append(weight)
 
     total = sum(weights)
     available = max(duration - 0.04, 0.1)
-
     cursor = 0.02
     result = []
 
     for word, weight in zip(words, weights):
         length = available * weight / total
-
-        result.append((
-            word,
-            cursor,
-            cursor + length,
-        ))
-
+        result.append((word, cursor, cursor + length))
         cursor += length
 
     return result
@@ -233,130 +161,74 @@ def emotion_instruction(emotion, delivery):
         "neutral": "natural conversational delivery",
     }
 
-    description = descriptions.get(
-        emotion,
-        descriptions["neutral"],
-    )
-
+    description = descriptions.get(emotion, descriptions["neutral"])
     if delivery:
         description += ", " + delivery
-
     return description
 
-
-# ============================================================
-# VOICE PROFILES
-# ============================================================
 
 def build_profiles(characters):
     if not isinstance(characters, list):
         raise ValueError("Karakter listesi geçersiz.")
-
     if not 2 <= len(characters) <= 8:
-        raise ValueError(
-            "Film kadrosunda 2-8 karakter bulunmalıdır."
-        )
-
-    profiles = {}
+        raise ValueError("Film kadrosunda 2-8 karakter bulunmalıdır.")
 
     gemini_voices = [
-        "Charon",
-        "Kore",
-        "Fenrir",
-        "Aoede",
-        "Puck",
-        "Leda",
-        "Orus",
-        "Zephyr",
+        "Charon", "Kore", "Fenrir", "Aoede",
+        "Puck", "Leda", "Orus", "Zephyr",
     ]
 
+    profiles = {}
     used_voices = set()
 
     for index, character in enumerate(characters):
-        character_id = clean_text(
-            character.get("id")
-        )
-
-        name = clean_text(
-            character.get("name")
-        )
+        character_id = clean_text(character.get("id"))
+        name = clean_text(character.get("name"))
 
         if not character_id or not name:
-            raise ValueError(
-                "Her karakterin ID ve adı bulunmalıdır."
-            )
-
+            raise ValueError("Her karakterin ID ve adı bulunmalıdır.")
         if character_id in profiles:
-            raise ValueError(
-                f"Tekrarlanan karakter ID: {character_id}"
-            )
+            raise ValueError(f"Tekrarlanan karakter ID: {character_id}")
 
         custom = character.get("voice_profile") or {}
-
         if not isinstance(custom, dict):
             custom = {}
 
-        gender = clean_text(
-            character.get("voice_gender")
-        ).lower()
-
+        gender = clean_text(character.get("voice_gender")).lower()
         edge_default = (
-            EDGE_FEMALE_VOICE
-            if gender == "female"
-            else EDGE_VOICE
+            EDGE_FEMALE_VOICE if gender == "female" else EDGE_VOICE
         )
 
-        gemini_voice = clean_text(
-            custom.get("gemini")
-        ) or gemini_voices[index]
+        gemini_voice = (
+            clean_text(custom.get("gemini")) or gemini_voices[index]
+        )
 
         if gemini_voice not in gemini_voices:
             raise ValueError(
                 f"Desteklenmeyen Gemini sesi: {gemini_voice}"
             )
-
         if gemini_voice in used_voices:
             raise ValueError(
-                f"Gemini sesi birden fazla karaktere atanmış: "
-                f"{gemini_voice}"
+                f"Gemini sesi birden fazla karaktere atanmış: {gemini_voice}"
             )
 
         used_voices.add(gemini_voice)
 
         profiles[character_id] = {
             "name": name,
-            "edge": (
-                clean_text(custom.get("edge"))
-                or edge_default
-            ),
+            "edge": clean_text(custom.get("edge")) or edge_default,
             "gemini": gemini_voice,
-            "voice_description": clean_text(
-                character.get("voice")
-            ),
+            "voice_description": clean_text(character.get("voice")),
         }
 
     return profiles
 
 
-# ============================================================
-# TTS PROVIDERS
-# ============================================================
-
-def tts_edge(
-    text,
-    output_path,
-    voice,
-    emotion="neutral",
-    delivery="natural",
-):
+def tts_edge(text, output_path, voice, emotion="neutral", delivery="natural"):
     import edge_tts
 
     async def generate():
-        communicator = edge_tts.Communicate(
-            text,
-            voice,
-        )
-
+        communicator = edge_tts.Communicate(text, voice)
         await communicator.save(str(output_path))
 
     asyncio.run(generate())
@@ -368,20 +240,10 @@ def tts_edge(
         raise RuntimeError("Edge TTS ses üretemedi.")
 
 
-def tts_gtts(
-    text,
-    output_path,
-    voice=None,
-    emotion="neutral",
-    delivery="natural",
-):
+def tts_gtts(text, output_path, voice=None, emotion="neutral", delivery="natural"):
     from gtts import gTTS
 
-    gTTS(
-        text=text,
-        lang=GTTS_LANG,
-        slow=False,
-    ).save(str(output_path))
+    gTTS(text=text, lang=GTTS_LANG, slow=False).save(str(output_path))
 
     if (
         not Path(output_path).is_file()
@@ -399,19 +261,14 @@ def tts_gemini(
     voice_description="",
 ):
     if not GEMINI_QUOTA_CONFIRMED:
-        raise RuntimeError(
-            "Gemini ücretsiz kotası doğrulanmadı."
-        )
+        raise RuntimeError("Gemini ücretsiz kotası doğrulanmadı.")
 
     from google import genai
     from google.genai import types
 
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
-
     if not api_key:
-        raise RuntimeError(
-            "GEMINI_API_KEY GitHub Secret bulunamadı."
-        )
+        raise RuntimeError("GEMINI_API_KEY GitHub Secret bulunamadı.")
 
     client = genai.Client(api_key=api_key)
 
@@ -439,46 +296,26 @@ def tts_gemini(
         ),
     )
 
-    candidates = getattr(
-        response,
-        "candidates",
-        None,
-    ) or []
-
+    candidates = getattr(response, "candidates", None) or []
     if not candidates:
         raise RuntimeError("Gemini ses yanıtı boş.")
 
-    parts = getattr(
-        candidates[0].content,
-        "parts",
-        None,
-    ) or []
-
+    parts = getattr(candidates[0].content, "parts", None) or []
     audio_part = next(
-        (
-            part for part in parts
-            if getattr(part, "inline_data", None)
-        ),
+        (part for part in parts if getattr(part, "inline_data", None)),
         None,
     )
-
     if audio_part is None:
-        raise RuntimeError(
-            "Gemini ses verisi döndürmedi."
-        )
+        raise RuntimeError("Gemini ses verisi döndürmedi.")
 
     inline = audio_part.inline_data
     audio_data = inline.data
 
     import base64
-
     if isinstance(audio_data, str):
         audio_data = base64.b64decode(audio_data)
 
-    mime = clean_text(
-        getattr(inline, "mime_type", "")
-    )
-
+    mime = clean_text(getattr(inline, "mime_type", ""))
     match = re.search(r"rate=(\d+)", mime)
     sample_rate = int(match.group(1)) if match else 24000
 
@@ -502,9 +339,7 @@ def tts_gemini(
         raw_path.unlink(missing_ok=True)
 
     if not Path(output_path).is_file():
-        raise RuntimeError(
-            "Gemini MP3 dosyası oluşturulamadı."
-        )
+        raise RuntimeError("Gemini MP3 dosyası oluşturulamadı.")
 
 
 PROVIDERS = {
@@ -514,16 +349,9 @@ PROVIDERS = {
 }
 
 
-# ============================================================
-# SPEECH SCHEDULE
-# ============================================================
-
 def build_utterances(scene, profiles):
     result = []
-
-    narration = clean_text(
-        scene.get("narration")
-    )
+    narration = clean_text(scene.get("narration"))
 
     if narration:
         result.append({
@@ -535,27 +363,18 @@ def build_utterances(scene, profiles):
         })
 
     turns = scene.get("dialogue_turns") or []
-
     if not isinstance(turns, list):
-        raise ValueError(
-            "dialogue_turns listesi geçersiz."
-        )
+        raise ValueError("dialogue_turns listesi geçersiz.")
 
     for turn in turns:
         if not isinstance(turn, dict):
             raise ValueError("Diyalog satırı geçersiz.")
 
-        speaker_id = clean_text(
-            turn.get("speaker")
-        )
-
+        speaker_id = clean_text(turn.get("speaker"))
         if speaker_id not in profiles:
-            raise ValueError(
-                f"Ses profili bulunamadı: {speaker_id}"
-            )
+            raise ValueError(f"Ses profili bulunamadı: {speaker_id}")
 
         text = clean_text(turn.get("text"))
-
         if not text:
             continue
 
@@ -563,25 +382,26 @@ def build_utterances(scene, profiles):
             "text": text,
             "speaker_id": speaker_id,
             "voice": profiles[speaker_id],
-            "emotion": clean_text(
-                turn.get("emotion")
-            ) or "neutral",
-            "delivery": clean_text(
-                turn.get("delivery")
-            ) or "natural",
+            "emotion": clean_text(turn.get("emotion")) or "neutral",
+            "delivery": clean_text(turn.get("delivery")) or "natural",
         })
 
     if not result:
-        raise ValueError(
-            "Sahnede seslendirilecek metin bulunamadı."
-        )
+        raise ValueError("Sahnede seslendirilecek metin bulunamadı.")
 
     return result
 
 
-# ============================================================
-# AUDIO SYNTHESIS
-# ============================================================
+def create_silence(path, duration):
+    run([
+        "ffmpeg", "-y",
+        "-f", "lavfi",
+        "-i", "anullsrc=r=44100:cl=stereo",
+        "-t", str(max(duration, 0.01)),
+        "-c:a", "libmp3lame",
+        "-b:a", "192k",
+        str(path),
+    ])
 
 
 def synthesize_scene(
@@ -593,16 +413,8 @@ def synthesize_scene(
     subtitle_entries,
     timeline,
 ):
-    # Wan worker: 81 frames / 16 FPS
-    scene_duration = 81 / 16
-
-    utterances = build_utterances(
-        scene,
-        profiles,
-    )
-
+    utterances = build_utterances(scene, profiles)
     function = PROVIDERS[provider]
-
     segments = []
     scene_cursor = 0.0
 
@@ -639,19 +451,14 @@ def synthesize_scene(
                 utterance["delivery"],
             )
 
-        duration = probe_duration(str(segment_path))
-
+        duration = probe_duration(segment_path)
         if duration <= 0:
             raise RuntimeError(
                 f"Scene {scene_index + 1}: boş ses segmenti."
             )
 
-        words = estimate_word_times(
-            utterance["text"],
-            duration,
-        )
-
-        scene_start = scene_index * scene_duration
+        words = estimate_word_times(utterance["text"], duration)
+        scene_start = scene_index * SCENE_DURATION
 
         for word, start, end in words:
             subtitle_entries.append({
@@ -668,37 +475,25 @@ def synthesize_scene(
                 work_dir
                 / f"scene_{scene_index:03d}_gap_{turn_index:03d}.mp3"
             )
-
             create_silence(gap_path, GAP_SECONDS)
             segments.append(gap_path)
             scene_cursor += GAP_SECONDS
 
-    if scene_cursor > scene_duration:
+    if scene_cursor > SCENE_DURATION:
         raise RuntimeError(
             f"Scene {scene_index + 1} ses süresi aşıldı: "
-            f"{scene_cursor:.2f}s / {scene_duration:.2f}s. "
+            f"{scene_cursor:.2f}s / {SCENE_DURATION:.2f}s. "
             "Konuşma kesilmedi. Sahne metnini kısaltın "
             "veya video sahne süresini artırın."
         )
 
-    concat_file = (
-        work_dir
-        / f"scene_{scene_index:03d}_concat.txt"
-    )
-
+    concat_file = work_dir / f"scene_{scene_index:03d}_concat.txt"
     concat_file.write_text(
-        "".join(
-            f"file '{path.resolve()}'\n"
-            for path in segments
-        ),
+        "".join(f"file '{path.resolve()}'\n" for path in segments),
         encoding="utf-8",
     )
 
-    raw_scene_audio = (
-        work_dir
-        / f"scene_{scene_index:03d}_raw.mp3"
-    )
-
+    raw_scene_audio = work_dir / f"scene_{scene_index:03d}_raw.mp3"
     run([
         "ffmpeg", "-y",
         "-f", "concat",
@@ -709,27 +504,19 @@ def synthesize_scene(
         str(raw_scene_audio),
     ])
 
-    actual_duration = probe_duration(
-        str(raw_scene_audio)
-    )
-
-    if actual_duration > scene_duration + 0.08:
+    actual_duration = probe_duration(raw_scene_audio)
+    if actual_duration > SCENE_DURATION + 0.08:
         raise RuntimeError(
             f"Scene {scene_index + 1}: birleştirilmiş ses "
-            f"sahne süresini aşıyor "
-            f"({actual_duration:.2f}s)."
+            f"sahne süresini aşıyor ({actual_duration:.2f}s)."
         )
 
-    scene_audio = (
-        work_dir
-        / f"scene_{scene_index:03d}_audio.mp3"
-    )
-
+    scene_audio = work_dir / f"scene_{scene_index:03d}_audio.mp3"
     run([
         "ffmpeg", "-y",
         "-i", str(raw_scene_audio),
         "-af", "apad",
-        "-t", str(scene_duration),
+        "-t", str(SCENE_DURATION),
         "-ar", "44100",
         "-ac", "2",
         "-c:a", "libmp3lame",
@@ -737,29 +524,9 @@ def synthesize_scene(
         str(scene_audio),
     ])
 
-    timeline[0] = (
-        (scene_index + 1) * scene_duration
-    )
-
+    timeline[0] = (scene_index + 1) * SCENE_DURATION
     return scene_audio
 
-
-
-def create_silence(path, duration):
-    run([
-        "ffmpeg", "-y",
-        "-f", "lavfi",
-        "-i", "anullsrc=r=44100:cl=stereo",
-        "-t", str(max(duration, 0.01)),
-        "-c:a", "libmp3lame",
-        "-b:a", "192k",
-        str(path),
-    ])
-
-
-# ============================================================
-# SUBTITLES
-# ============================================================
 
 def write_srt(entries, output_path):
     lines = []
@@ -776,37 +543,21 @@ def write_srt(entries, output_path):
             "",
         ])
 
-    Path(output_path).write_text(
-        "\n".join(lines),
-        encoding="utf-8",
-    )
+    Path(output_path).write_text("\n".join(lines), encoding="utf-8")
 
-
-# ============================================================
-# AUDIO MIX AND VIDEO MUX
-# ============================================================
 
 def mux_audio(video_path, audio_path, output_path):
-    video_duration = probe_duration(str(video_path))
-    audio_duration = probe_duration(str(audio_path))
+    video_duration = probe_duration(video_path)
+    audio_duration = probe_duration(audio_path)
 
-    REPORT["video_duration_seconds"] = round(
-        video_duration,
-        3,
-    )
-
-    REPORT["audio_duration_seconds"] = round(
-        audio_duration,
-        3,
-    )
+    REPORT["video_duration_seconds"] = round(video_duration, 3)
+    REPORT["audio_duration_seconds"] = round(audio_duration, 3)
 
     if audio_duration > video_duration + 0.5:
         raise RuntimeError(
-            "Ses video süresinden uzun. "
-            "Konuşmalar kesilmeyecek; sahne süreleri "
-            "veya kurgu yeniden düzenlenmeli. "
-            f"Video={video_duration:.2f}s, "
-            f"Ses={audio_duration:.2f}s"
+            "Ses video süresinden uzun. Konuşmalar kesilmeyecek; "
+            "sahne süreleri veya kurgu yeniden düzenlenmeli. "
+            f"Video={video_duration:.2f}s, Ses={audio_duration:.2f}s"
         )
 
     run([
@@ -828,38 +579,117 @@ def mux_audio(video_path, audio_path, output_path):
         not Path(output_path).is_file()
         or Path(output_path).stat().st_size < 10000
     ):
+        raise RuntimeError("Sesli final video oluşturulamadı.")
+
+
+def _licensed_asset(settings, name, project_dir):
+    """Convert canonical asset settings to the mixer's input format."""
+    if not isinstance(settings, dict) or not settings.get("enabled", False):
+        return None
+
+    asset_path = clean_text(settings.get("asset_path"))
+    if not asset_path:
         raise RuntimeError(
-            "Sesli final video oluşturulamadı."
+            f"{name}: etkinleştirilmiş ancak asset_path boş."
         )
 
+    asset = Path(asset_path)
+    if not asset.is_absolute():
+        asset = Path(project_dir) / asset
 
-# ============================================================
-# MAIN PIPELINE
-# ============================================================
+    return {
+        "path": str(asset.resolve()),
+        "volume": settings.get("volume", 0.2),
+        "license_verified": settings.get("license_verified") is True,
+    }
+
+
+def build_audio_mix_configuration(audio_settings, scenes, project_dir):
+    """Resolve enabled local audio assets and scene effects."""
+    music_settings = audio_settings.get("music") or {}
+    ambience_settings = audio_settings.get("ambience") or {}
+    effects_settings = audio_settings.get("sound_effects") or {}
+
+    music = _licensed_asset(music_settings, "Müzik", project_dir)
+    ambience = _licensed_asset(ambience_settings, "Ambiyans", project_dir)
+
+    effects = []
+    ignored_text_effects = 0
+
+    if effects_settings.get("enabled", False):
+        for scene_index, scene in enumerate(scenes):
+            scene_effects = scene.get("sound_effects") or []
+            if not isinstance(scene_effects, list):
+                continue
+
+            for effect_index, effect in enumerate(scene_effects):
+                # Text descriptions are not audio files.
+                if isinstance(effect, str):
+                    if effect.strip():
+                        ignored_text_effects += 1
+                    continue
+
+                if not isinstance(effect, dict):
+                    continue
+
+                asset_path = clean_text(effect.get("asset_path"))
+                if not asset_path:
+                    raise RuntimeError(
+                        f"Sahne {scene_index + 1}, efekt {effect_index + 1}: "
+                        "asset_path boş."
+                    )
+
+                try:
+                    local_offset = float(effect.get("offset", 0.0))
+                except (TypeError, ValueError, OverflowError):
+                    raise RuntimeError(
+                        f"Sahne {scene_index + 1}: efekt offset geçersiz."
+                    )
+
+                if local_offset < 0:
+                    raise RuntimeError("Efekt offset değeri negatif olamaz.")
+
+                effect_path = Path(asset_path)
+                if not effect_path.is_absolute():
+                    effect_path = Path(project_dir) / effect_path
+
+                effects.append({
+                    "path": str(effect_path.resolve()),
+                    "volume": effect.get(
+                        "volume",
+                        effects_settings.get("volume", 0.45),
+                    ),
+                    "license_verified": (
+                        effect.get("license_verified") is True
+                    ),
+                    "offset": scene_index * SCENE_DURATION + local_offset,
+                })
+
+    return {
+        "music": music,
+        "ambience": ambience,
+        "effects": effects,
+        "ignored_text_effects": ignored_text_effects,
+        "mix_settings": audio_settings.get("mix") or {},
+        "music_ducking": bool(music_settings.get("ducking", True)),
+    }
+
 
 def process(project_path, video_path, output_path, work_dir):
     require_binary("ffmpeg")
     require_binary("ffprobe")
 
     project = read_json(project_path)
-
-    film = project.get("film") or {}
     audio_settings = project.get("audio") or {}
     characters = project.get("characters") or []
     scenes = project.get("scenes") or []
 
     if audio_settings.get("enabled") is False:
-        raise RuntimeError(
-            "Proje ses sistemi devre dışı bırakılmış."
-        )
-
+        raise RuntimeError("Proje ses sistemi devre dışı bırakılmış.")
     if not scenes:
         raise RuntimeError("Film sahneleri bulunamadı.")
-
     if not Path(video_path).is_file():
-        raise RuntimeError(
-            f"Video bulunamadı: {video_path}"
-        )
+        raise RuntimeError(f"Video bulunamadı: {video_path}")
 
     profiles = build_profiles(characters)
 
@@ -867,31 +697,23 @@ def process(project_path, video_path, output_path, work_dir):
         "tts_provider_order",
         ["gemini", "edge", "gtts"],
     )
-
     if not isinstance(configured, list):
         configured = ["edge", "gtts"]
 
     REPORT["providers_requested"] = configured
-
     providers = []
 
     for name in configured:
         name = clean_text(name).lower()
-
-        if name == "xai":
-            continue
-
-        if name not in PROVIDERS:
+        if name == "xai" or name not in PROVIDERS:
             continue
 
         if name == "gemini":
             if not GEMINI_QUOTA_CONFIRMED:
                 REPORT["notes"].append(
-                    "Gemini atlandı: ücretsiz kota "
-                    "doğrulanmadı."
+                    "Gemini atlandı: ücretsiz kota doğrulanmadı."
                 )
                 continue
-
             if not os.getenv("GEMINI_API_KEY"):
                 REPORT["notes"].append(
                     "Gemini atlandı: API anahtarı yok."
@@ -912,9 +734,7 @@ def process(project_path, video_path, output_path, work_dir):
 
     for provider in providers:
         try:
-            REPORT["notes"].append(
-                f"{provider} sağlayıcısı deneniyor."
-            )
+            REPORT["notes"].append(f"{provider} sağlayıcısı deneniyor.")
 
             scene_audio_files = []
             subtitle_entries = []
@@ -930,11 +750,9 @@ def process(project_path, video_path, output_path, work_dir):
                     subtitle_entries,
                     timeline,
                 )
-
                 scene_audio_files.append(audio_file)
 
             concat_file = work_dir / "film_audio_concat.txt"
-
             concat_file.write_text(
                 "".join(
                     f"file '{path.resolve()}'\n"
@@ -944,7 +762,6 @@ def process(project_path, video_path, output_path, work_dir):
             )
 
             combined_audio = work_dir / "film_dialogue.mp3"
-
             run([
                 "ffmpeg", "-y",
                 "-f", "concat",
@@ -955,26 +772,81 @@ def process(project_path, video_path, output_path, work_dir):
                 str(combined_audio),
             ])
 
-            duration = probe_duration(str(combined_audio))
-
-            if duration <= 0:
-                raise RuntimeError(
-                    "Birleştirilmiş ses boş."
-                )
+            if probe_duration(combined_audio) <= 0:
+                raise RuntimeError("Birleştirilmiş ses boş.")
 
             srt_path = Path(output_path).with_suffix(".srt")
+            write_srt(subtitle_entries, srt_path)
 
-            write_srt(
-                subtitle_entries,
-                srt_path,
+            video_duration = probe_duration(video_path)
+
+            mix_config = build_audio_mix_configuration(
+                audio_settings,
+                scenes,
+                Path(project_path).resolve().parent,
             )
 
-            mux_audio(
-                video_path,
-                combined_audio,
-                output_path,
+            music_asset = mix_config["music"]
+            ambience_asset = mix_config["ambience"]
+            effect_assets = mix_config["effects"]
+
+            mix_report = {
+                "status": "dialogue_only",
+                "layers": ["dialogue"],
+                "ignored_text_effect_descriptions": (
+                    mix_config["ignored_text_effects"]
+                ),
+                "notes": [],
+            }
+
+            if music_asset or ambience_asset or effect_assets:
+                mixed_audio = work_dir / "film_final_mix.m4a"
+                mix_settings = mix_config["mix_settings"]
+
+                mix_report = mix_audio_layers(
+                    voice_path=combined_audio,
+                    output_path=mixed_audio,
+                    duration=video_duration,
+                    music=music_asset,
+                    ambience=ambience_asset,
+                    effects=effect_assets,
+                    sample_rate=int(
+                        mix_settings.get("sample_rate", 48000)
+                    ),
+                    loudness_lufs=float(
+                        mix_settings.get("loudness_lufs", -16.0)
+                    ),
+                    true_peak_db=float(
+                        mix_settings.get("true_peak_db", -1.5)
+                    ),
+                    music_ducking=mix_config["music_ducking"],
+                )
+
+                audio_for_video = mixed_audio
+                mix_report["status"] = "success"
+            else:
+                audio_for_video = combined_audio
+                mix_report["notes"].append(
+                    "Etkin lisanslı müzik, ambiyans veya ses efekti "
+                    "bulunmadığından diyalog sesi doğrudan kullanıldı."
+                )
+
+            mix_report["ignored_text_effect_descriptions"] = (
+                mix_config["ignored_text_effects"]
             )
 
+            mix_report_path = Path(output_path).with_name(
+                "audio_mix_report.json"
+            )
+            write_mix_report(mix_report_path, mix_report)
+
+            mux_audio(video_path, audio_for_video, output_path)
+
+            REPORT["mix_report_file"] = str(mix_report_path)
+            REPORT["mix_layers"] = mix_report.get(
+                "layers",
+                ["dialogue"],
+            )
             REPORT["status"] = "success"
             REPORT["provider_used"] = provider
             REPORT["subtitle_file"] = str(srt_path)
@@ -983,7 +855,9 @@ def process(project_path, video_path, output_path, work_dir):
             if provider != providers[0]:
                 REPORT["fallbacks"].append({
                     "selected": provider,
-                    "reason": str(last_error or "Önceki sağlayıcı atlandı."),
+                    "reason": str(
+                        last_error or "Önceki sağlayıcı atlandı."
+                    ),
                 })
 
             REPORT["notes"].append(
@@ -993,33 +867,31 @@ def process(project_path, video_path, output_path, work_dir):
                 "Altyazı zamanları ses segmentlerinden oluşturuldu."
             )
             REPORT["notes"].append(
-                "Müzik, ortam sesi ve efekt dosyaları bu sürümde "
-                "otomatik üretilmez; lisans ve kaynak doğrulaması "
-                "yapılmadan eklenmez."
+                "Müzik, ambiyans ve efektler yalnızca etkinleştirilmiş, "
+                "dosyası bulunan ve lisansı doğrulanmış yerel varlıklardan "
+                "miksaja eklenir. Metin efekt açıklamaları ses dosyası "
+                "olmadığı için üretilmez."
             )
 
             report_path = Path(output_path).with_name(
                 "audio_runtime_report.json"
             )
-
             write_json(report_path, REPORT)
 
             print("AUDIO_POSTPROCESS_SUCCESS")
             print("Provider:", provider)
             print("Final:", output_path)
             print("Subtitles:", srt_path)
+            print("Mix report:", mix_report_path)
             print("Report:", report_path)
-
             return
 
         except Exception as exc:
             last_error = exc
-
             REPORT["fallbacks"].append({
                 "failed_provider": provider,
                 "error": str(exc)[:500],
             })
-
             print(
                 f"{provider} başarısız: {exc}",
                 file=sys.stderr,
@@ -1033,7 +905,6 @@ def process(project_path, video_path, output_path, work_dir):
     report_path = Path(output_path).with_name(
         "audio_runtime_report.json"
     )
-
     write_json(report_path, REPORT)
 
     raise RuntimeError(
@@ -1043,27 +914,10 @@ def process(project_path, video_path, output_path, work_dir):
 
 def main():
     parser = argparse.ArgumentParser()
-
-    parser.add_argument(
-        "--project",
-        required=True,
-    )
-
-    parser.add_argument(
-        "--video",
-        required=True,
-    )
-
-    parser.add_argument(
-        "--output",
-        default="output/final-film.mp4",
-    )
-
-    parser.add_argument(
-        "--work-dir",
-        default=".work/audio",
-    )
-
+    parser.add_argument("--project", required=True)
+    parser.add_argument("--video", required=True)
+    parser.add_argument("--output", default="output/final-film.mp4")
+    parser.add_argument("--work-dir", default=".work/audio")
     args = parser.parse_args()
 
     try:
@@ -1073,7 +927,6 @@ def main():
             args.output,
             args.work_dir,
         )
-
     except Exception as exc:
         print(
             f"AUDIO_POSTPROCESS_FAILED: {exc}",
@@ -1084,3 +937,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
