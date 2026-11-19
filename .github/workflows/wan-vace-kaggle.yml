@@ -1433,6 +1433,25 @@ jobs:
             echo "Karakter referans doğrulama raporu bulunamadı."
             exit 1
           fi
+          
+      - name: Film seslendirme ve altyazı üretimi
+        if: ${{ inputs.run_mode == 'production' && inputs.project_json != '' }}
+        env:
+          GEMINI_TTS_FREE_QUOTA_CONFIRMED: ${{ inputs.gemini_tts_free_quota_confirmed }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+          cp output/final-film.mp4 output/silent-film.mp4
+
+          python wan_audio_postprocess.py \
+            --project .work/project.json \
+            --video output/silent-film.mp4 \
+            --output output/final-film.mp4 \
+            --work-dir .work/audio
 
       - name: Film ve performans raporunu sakla
         if: ${{ inputs.run_mode == 'production' }}
