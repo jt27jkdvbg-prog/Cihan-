@@ -1,4 +1,3 @@
-
 name: Wan Multi-Scene Film Generator
 
 on:
@@ -305,7 +304,8 @@ jobs:
               "prompt": prompt,
               "style": style,
               "character_bible": character_bible,
-              "scenes": scenes
+              "scenes": scenes,
+              "reference_bundle_required": bool(raw_project)
           }
 
           metadata = {
@@ -369,6 +369,66 @@ jobs:
 
               output_dir = WORK / "film_output"
               output_dir.mkdir(parents=True, exist_ok=True)
+
+              # Character reference images are validated here. The current
+              # WanT2V pipeline remains text-to-video; validation is NOT
+              # equivalent to image conditioning or identity consistency.
+              reference_status = {
+                  "status": "not_required",
+                  "images_verified": 0,
+                  "scene_references_verified": 0,
+                  "conditioning_applied": False,
+                  "engine": "Wan2.1-T2V-1.3B",
+              }
+
+              if request.get("reference_bundle_required", False):
+                  worker_dir = Path(__file__).resolve().parent
+                  sys.path.insert(0, str(worker_dir))
+
+                  from wan_kaggle_reference_loader import load_reference_bundle
+
+                  input_root = Path("/kaggle/input")
+                  if not input_root.is_dir():
+                      raise RuntimeError(
+                          "Kaggle input dizini bulunamadı; karakter referans veri seti bağlanmamış."
+                      )
+
+                  manifests = sorted(input_root.rglob("reference_bundle.json"))
+                  if len(manifests) != 1:
+                      raise RuntimeError(
+                          "Tam olarak bir reference_bundle.json bekleniyordu; "
+                          f"bulunan: {len(manifests)}"
+                      )
+
+                  verified_bundle = load_reference_bundle(manifests[0].parent)
+                  validation = verified_bundle["runtime_validation"]
+
+                  reference_status = {
+                      **validation,
+                      "conditioning_applied": False,
+                      "engine": "Wan2.1-T2V-1.3B",
+                      "note": (
+                          "Referans görseller ve sahne eşleştirmeleri doğrulandı. "
+                          "Mevcut T2V modeline görüntü koşullandırması uygulanmadı."
+                      ),
+                  }
+
+              (output_dir / "reference_runtime_status.json").write_text(
+                  json.dumps(reference_status, ensure_ascii=False, indent=2),
+                  encoding="utf-8",
+              )
+
+              print(
+                  "Karakter referans doğrulama durumu:",
+                  reference_status["status"],
+                  "| görüntü:",
+                  reference_status["images_verified"],
+                  "| sahne eşleşmesi:",
+                  reference_status["scene_references_verified"],
+                  "| görsel koşullandırma:",
+                  reference_status["conditioning_applied"],
+                  flush=True,
+              )
 
               print("1. GPU kontrolü", flush=True)
 
@@ -866,7 +926,7 @@ jobs:
           print("Sahne sayısı:", len(scenes))
           print("Worker ve metadata hazır.")
           PY
-      
+
       - name: Karakter referanslarını üret ve Kaggle'a private yükle
         if: ${{ inputs.run_mode == 'production' && inputs.project_json != '' }}
         env:
@@ -956,7 +1016,8 @@ jobs:
           )
 
           required_request_fields = {
-              "topic", "prompt", "style", "character_bible", "scenes"
+              "topic", "prompt", "style", "character_bible", "scenes",
+              "reference_bundle_required"
           }
 
           missing = required_request_fields - set(request)
@@ -995,6 +1056,26 @@ jobs:
               "capture_gpu(",
               "performance_report.json",
           ]
+
+          required_reference_fragments = [
+              "from wan_kaggle_reference_loader import load_reference_bundle",
+              'Path("/kaggle/input")',
+              "load_reference_bundle(manifests[0].parent)",
+              "reference_runtime_status.json",
+              '"conditioning_applied": False',
+          ]
+
+          for fragment in required_reference_fragments:
+              if fragment not in source:
+                  raise SystemExit(
+                      "Karakter referans runtime entegrasyonu eksik: " + fragment
+                  )
+
+          if not Path("kaggle-worker/wan_kaggle_reference_loader.py").is_file():
+              raise SystemExit("Kaggle referans doğrulama modülü Worker'a kopyalanmamış.")
+
+          if request["reference_bundle_required"] is not True and request["reference_bundle_required"] is not False:
+              raise SystemExit("reference_bundle_required boolean olmalıdır.")
 
           for fragment in required_profiler_fragments:
               if fragment not in source:
@@ -1219,6 +1300,16 @@ jobs:
             exit 1
           fi
 
+          REFERENCE_STATUS=$(find output -type f -name "reference_runtime_status.json" | head -n 1)
+
+          if [ -n "$REFERENCE_STATUS" ]; then
+            cp "$REFERENCE_STATUS" output/reference_runtime_status.json
+            echo "Karakter referans doğrulama raporu bulundu."
+          else
+            echo "Karakter referans doğrulama raporu bulunamadı."
+            exit 1
+          fi
+
       - name: Film ve performans raporunu sakla
         if: ${{ inputs.run_mode == 'production' }}
         uses: actions/upload-artifact@v4
@@ -1228,6 +1319,6 @@ jobs:
             output/final-film.mp4
             output/**/*.mp4
             output/performance_report.json
+            output/reference_runtime_status.json
           if-no-files-found: error
           retention-days: 7
-
