@@ -1,3 +1,4 @@
+
 name: Wan Multi-Scene Film Generator
 
 on:
@@ -15,6 +16,11 @@ on:
         options:
           - preflight
           - production
+      gemini_tts_free_quota_confirmed:
+        description: "Gemini hesabındaki ücretsiz TTS kotasını kontrol ettim"
+        required: true
+        default: false
+        type: boolean
       konu:
         description: "Filmin konusu (eski yöntem)"
         required: false
@@ -50,7 +56,6 @@ jobs:
         with:
           python-version: "3.11"
 
-      
       - name: Kaggle CLI kur
         run: |
           set -euo pipefail
@@ -82,7 +87,6 @@ jobs:
           kaggle kernels list --mine
 
           echo "KAGGLE_AUTH_CHECK=SUCCESS"
-
 
       - name: Film projesini doğrula ve Worker hazırla
         env:
@@ -379,7 +383,6 @@ jobs:
               output_dir = WORK / "film_output"
               output_dir.mkdir(parents=True, exist_ok=True)
 
-              # Verified per-scene reference images are passed to WanVace.
               verified_bundle = None
               conditioning_scenes = 0
               reference_status = {
@@ -968,7 +971,6 @@ jobs:
               encoding="utf-8"
           )
 
-
           loader_source = Path("wan_kaggle_reference_loader.py")
 
           if not loader_source.is_file():
@@ -1295,6 +1297,38 @@ jobs:
           echo "Ön kontrol başarıyla tamamlandı."
           echo "Kaggle GPU üretimi başlatılmadı."
 
+      - name: Üretim öncesi maliyet kontrolü
+        if: ${{ inputs.run_mode == 'production' }}
+        env:
+          GEMINI_TTS_FREE_QUOTA_CONFIRMED: ${{ inputs.gemini_tts_free_quota_confirmed }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${{ inputs.project_json }}" ]; then
+            echo "Eski konu/prompt giriş yöntemi kullanılıyor."
+            echo "Bu yöntemde standart project.json bulunmadığından"
+            echo "ses servisleri için maliyet kontrolü çalıştırılmadı."
+            echo "Mevcut Wan Worker yalnızca sessiz video üretmektedir."
+            echo "Ses üretimi bağlanana kadar bu adımda ücretli ses servisi çağrılmaz."
+            exit 0
+          fi
+
+          if [ ! -f ".work/project.json" ]; then
+            echo "Canonical project.json bulunamadı."
+            echo "Maliyet kontrolü yapılamadığı için üretim durduruldu."
+            exit 1
+          fi
+
+          if [ ! -f "production_cost_guard.py" ]; then
+            echo "production_cost_guard.py bulunamadı."
+            echo "Maliyet kontrolü yapılamadığı için üretim durduruldu."
+            exit 1
+          fi
+
+          python production_cost_guard.py \
+            --project .work/project.json \
+            --report output/cost_report.json
+
       - name: Kaggle GPU görevini başlat
         if: ${{ inputs.run_mode == 'production' }}
         run: |
@@ -1397,5 +1431,7 @@ jobs:
             output/**/*.mp4
             output/performance_report.json
             output/reference_runtime_status.json
+            output/cost_report.json
           if-no-files-found: error
           retention-days: 7
+
