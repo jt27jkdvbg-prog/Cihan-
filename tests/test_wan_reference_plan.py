@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from pipeline_config import ProjectConfigError
 from wan_reference_plan import (
     WanReferencePlanError,
     build_vace_reference_plan,
@@ -71,7 +72,6 @@ class WanReferencePlanTests(unittest.TestCase):
         self.assets_root.mkdir(parents=True)
 
         self.project = make_project()
-
         self.records = []
 
         for character in self.project["characters"]:
@@ -166,22 +166,18 @@ class WanReferencePlanTests(unittest.TestCase):
             first["character_ids"],
             ["hero", "friend"],
         )
-
         self.assertEqual(
             len(first["reference_images"]),
             2,
         )
-
         self.assertEqual(
             second["character_ids"],
             ["hero"],
         )
-
         self.assertEqual(
             len(second["reference_images"]),
             1,
         )
-
         self.assertEqual(
             second["reference_images"][0]["character_id"],
             "hero",
@@ -194,7 +190,9 @@ class WanReferencePlanTests(unittest.TestCase):
             for reference in scene["reference_images"]:
                 path = self.root / reference["path"]
                 self.assertTrue(path.is_file())
-                self.assertFalse(Path(reference["path"]).is_absolute())
+                self.assertFalse(
+                    Path(reference["path"]).is_absolute()
+                )
 
     def test_scene_without_characters_has_no_references(self):
         project = make_project()
@@ -306,20 +304,14 @@ class WanReferencePlanTests(unittest.TestCase):
             self.build()
 
     def test_missing_image_is_rejected(self):
-        image = (
-            self.root
-            / self.records[0]["path"]
-        )
+        image = self.root / self.records[0]["path"]
         image.unlink()
 
         with self.assertRaises(WanReferencePlanError):
             self.build()
 
     def test_unsupported_image_format_is_rejected(self):
-        image = (
-            self.root
-            / self.records[0]["path"]
-        )
+        image = self.root / self.records[0]["path"]
         image.write_bytes(b"NOT-AN-IMAGE" * 1000)
 
         records = [dict(item) for item in self.records]
@@ -342,27 +334,13 @@ class WanReferencePlanTests(unittest.TestCase):
         with self.assertRaises(WanReferencePlanError):
             self.build()
 
-        def test_unknown_scene_character_is_rejected(self):
-        project = make_project()
-        project["scenes"][0]["character_ids"] = [
-            "not-in-project",
-        ]
-
-        from pipeline_config import ProjectConfigError
-
-        with self.assertRaises(ProjectConfigError):
-            build_vace_reference_plan(
-                project,
-                self.root,
-            )
-
     def test_unknown_scene_character_is_rejected(self):
         project = make_project()
         project["scenes"][0]["character_ids"] = [
             "not-in-project",
         ]
 
-        with self.assertRaises(WanReferencePlanError):
+        with self.assertRaises(ProjectConfigError):
             build_vace_reference_plan(
                 project,
                 self.root,
@@ -401,3 +379,4 @@ class WanReferencePlanTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
