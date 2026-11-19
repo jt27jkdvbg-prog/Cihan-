@@ -124,6 +124,9 @@ class CharacterAssetGeneratorTests(unittest.TestCase):
         project = make_project()
         project["characters"] = []
 
+        # The scene must not reference a character that no longer exists.
+        project["scenes"][0]["character_ids"] = []
+
         with tempfile.TemporaryDirectory() as temporary:
             with self.assertRaises(CharacterAssetError):
                 generate_character_assets(
@@ -198,3 +201,4 @@ class CharacterAssetGeneratorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
