@@ -29,15 +29,18 @@ STAGES = (
     "publishing",
 )
 
+# Video and character assets can now be generated independently
+# after the script stage. Post-production waits for both.
 DEPENDENCIES = {
     "project_validation": (),
     "script": ("project_validation",),
     "character_assets": ("script",),
-    "video_generation": ("character_assets",),
+    "video_generation": ("script",),
     "audio_generation": ("script",),
     "post_production": (
         "video_generation",
         "audio_generation",
+        "character_assets",
     ),
     "quality_control": ("post_production",),
     "publishing": ("quality_control",),
