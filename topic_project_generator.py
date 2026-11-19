@@ -313,8 +313,9 @@ def build_prompt(topic, style, language, seconds):
                 "voice": "Distinct voice description",
                 "voice_gender": "male",
                 "voice_profile": {
-                    "edge": "",
+                    "xai": "",
                     "gemini": "",
+                    "edge": "",
                 },
             },
             {
@@ -325,8 +326,9 @@ def build_prompt(topic, style, language, seconds):
                 "voice": "Distinct voice description",
                 "voice_gender": "female",
                 "voice_profile": {
-                    "edge": "",
+                    "xai": "",
                     "gemini": "",
+                    "edge": "",
                 },
             },
         ],
@@ -342,6 +344,9 @@ def build_prompt(topic, style, language, seconds):
                 "image_prompt": "Detailed cinematic first-frame image prompt",
                 "motion_prompt": "Specific continuous physical movement",
                 "sound": "Ambience and sound effects",
+                "sound_effects": [],
+                "ambience": "",
+                "music": "",
                 "dialogue_turns": [
                     {
                         "speaker": "character_1",
@@ -355,6 +360,50 @@ def build_prompt(topic, style, language, seconds):
                 "transition": "Transition to next scene",
             }
         ],
+        "audio": {
+            "enabled": True,
+            "tts_provider_order": [
+                "gemini",
+                "edge",
+                "gtts",
+                "xai",
+            ],
+            "narration_enabled": True,
+            "subtitles": {
+                "enabled": True,
+                "format": "srt",
+                "burn_in": False,
+            },
+            "music": {
+                "enabled": False,
+                "provider": "licensed_library",
+                "prompt": "",
+                "volume": 0.18,
+                "ducking": True,
+            },
+            "ambience": {
+                "enabled": False,
+                "provider": "licensed_library",
+                "prompt": "",
+                "volume": 0.22,
+            },
+            "sound_effects": {
+                "enabled": False,
+                "provider": "licensed_library",
+                "volume": 0.45,
+            },
+        },
+        "cost_policy": {
+            "mode": "free_only",
+            "paid_services_allowed": False,
+            "require_approval": True,
+            "show_cost_before_run": True,
+            "block_unknown_prices": True,
+            "currency": "USD",
+            "max_project_budget": 0.0,
+            "record_estimated_costs": True,
+            "record_actual_costs": True,
+        },
     }
 
     return f"""
@@ -407,6 +456,21 @@ MANDATORY RULES:
 17. Avoid graphic violence and explicit sexual content.
 18. Return JSON only. No Markdown or explanations.
 
+AUDIO AND COST RULES:
+
+19. Keep the audio configuration in the structure.
+20. Use this default TTS order: Gemini, Edge TTS, gTTS, then xAI.
+21. xAI is a paid optional provider. Never make it the default.
+22. Do not enable paid music or sound-effect generation.
+23. Do not enable FAL or any other paid audio-generation service.
+24. Use free or properly licensed audio assets only when available.
+25. Keep cost_policy.mode as "free_only".
+26. Keep paid_services_allowed as false.
+27. Keep max_project_budget as 0.
+28. Never change cost settings to enable a paid service.
+29. Leave provider voice IDs empty unless a valid voice ID is known.
+30. Do not invent prices, quotas, API keys or service availability.
+
 The JSON must be complete and valid. Do not truncate it.
 """.strip()
 
@@ -458,6 +522,43 @@ def generate_project(topic, style="cinematic realistic"):
 
             script = extract_json(raw)
 
+            # Model çıktısı maliyet politikasını değiştiremez.
+            # Proje daima ücretsiz modda başlar.
+            script["cost_policy"] = {
+                "mode": "free_only",
+                "paid_services_allowed": False,
+                "require_approval": True,
+                "show_cost_before_run": True,
+                "block_unknown_prices": True,
+                "currency": "USD",
+                "max_project_budget": 0.0,
+                "record_estimated_costs": True,
+                "record_actual_costs": True,
+            }
+
+            # Ücretli müzik ve efekt servisleri model tarafından
+            # etkinleştirilmiş olsa bile varsayılan olarak kapatılır.
+            if isinstance(script.get("audio"), dict):
+                audio = script["audio"]
+
+                audio["tts_provider_order"] = [
+                    "gemini",
+                    "edge",
+                    "gtts",
+                    "xai",
+                ]
+
+                for section in ("music", "sound_effects"):
+                    settings = audio.get(section)
+                    if isinstance(settings, dict):
+                        settings["enabled"] = False
+                        settings["provider"] = "licensed_library"
+
+                ambience = audio.get("ambience")
+                if isinstance(ambience, dict):
+                    ambience["enabled"] = False
+                    ambience["provider"] = "licensed_library"
+
             project = build_film_project(
                 script,
                 topic=topic,
@@ -475,6 +576,8 @@ def generate_project(topic, style="cinematic realistic"):
                 + str(len(project["characters"]))
                 + " | sağlayıcı: "
                 + provider
+                + " | maliyet modu: "
+                + project["cost_policy"]["mode"]
             )
 
             return project
@@ -494,6 +597,8 @@ def generate_project(topic, style="cinematic realistic"):
                 + "\n\nIMPORTANT: Your previous response failed "
                 "JSON parsing or project validation.\n"
                 + "Correct the complete project and return valid JSON only.\n"
+                + "Do not change the free-only cost policy.\n"
+                + "Do not enable paid services.\n"
                 + "ERROR:\n"
                 + str(exc)[:5000]
                 + "\n\nPREVIOUS RESPONSE:\n"
@@ -546,3 +651,8 @@ if __name__ == "__main__":
     print("PROJECT_TITLE=" + project["film"]["title"])
     print("SCENE_COUNT=" + str(len(project["scenes"])))
     print("CHARACTER_COUNT=" + str(len(project["characters"])))
+    print("COST_MODE=" + project["cost_policy"]["mode"])
+    print(
+        "PAID_SERVICES_ALLOWED="
+        + str(project["cost_policy"]["paid_services_allowed"])
+    )
