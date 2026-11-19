@@ -365,22 +365,29 @@ class ProductionOrchestratorTests(unittest.TestCase):
         attempt = job.start_stage("project_validation")
         self.assertEqual(attempt, 1)
 
-    def test_video_requires_character_assets(self):
+    def test_video_does_not_require_character_assets(self):
         job = self.create_job()
 
         self.complete_stage(job, "project_validation")
         self.complete_stage(job, "script")
 
-        with self.assertRaises(OrchestrationError):
-            job.start_stage("video_generation")
+        self.assertEqual(
+            job.manifest["stages"]["character_assets"]["status"],
+            "pending",
+        )
 
-        job.complete_stage if False else None
+        attempt = job.start_stage("video_generation")
 
-        self.complete_stage(job, "character_assets")
+        self.assertEqual(attempt, 1)
 
         self.assertEqual(
-            job.start_stage("video_generation"),
-            1,
+            job.manifest["stages"]["video_generation"]["status"],
+            "running",
+        )
+
+        self.assertEqual(
+            job.manifest["stages"]["character_assets"]["status"],
+            "pending",
         )
 
     def test_audio_and_video_can_run_in_parallel(self):
