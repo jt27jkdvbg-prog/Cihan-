@@ -1,5 +1,5 @@
 
-"""Register verified Wan and character assets in the production orchestrator."""
+"""Register verified Wan outputs and character reference plans."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from typing import Any, Mapping
 from pipeline_config import FilmProject, ProjectConfigError
 from production_orchestrator import ProductionJob
 from project_adapter import legacy_to_pipeline_project
+from wan_reference_plan import write_vace_reference_plan
 
 
 class CharacterAssetRegistrationError(ValueError):
@@ -123,7 +124,6 @@ def _register_character_assets(
     job: ProductionJob,
 ) -> list[str]:
     root = Path(source_dir).resolve()
-
     manifest_path = root / "character_assets.json"
 
     if not manifest_path.is_file():
@@ -238,7 +238,11 @@ def _register_character_assets(
         actual_size = source.stat().st_size
         expected_size = record.get("bytes")
 
-        if not isinstance(expected_size, int) or actual_size != expected_size:
+        if (
+            isinstance(expected_size, bool)
+            or not isinstance(expected_size, int)
+            or actual_size != expected_size
+        ):
             raise CharacterAssetRegistrationError(
                 f"Character image size mismatch: {character_id}"
             )
@@ -303,6 +307,71 @@ def _register_character_assets(
     return artifact_paths
 
 
+def _create_reference_plan(
+    project: FilmProject,
+    job: ProductionJob,
+) -> str:
+    """Create and return the workspace-relative reference plan path."""
+
+    output = write_vace_reference_plan(
+        project.to_dict(),
+        job.workspace,
+    )
+
+    return output.relative_to(job.workspace).as_posix()
+
+
+def _write_reference_runtime_status(
+    job: ProductionJob,
+    *,
+    plan_path: str | None,
+    project_has_characters: bool,
+) -> str:
+    """Record the actual runtime state without claiming VACE execution."""
+
+    status_path = (
+        job.workspace
+        / "artifacts"
+        / "wan"
+        / "reference_runtime_status.json"
+    )
+
+    if plan_path:
+        status = "plan_ready_runtime_not_integrated"
+        reason = (
+            "The scene-specific reference plan was validated and saved. "
+            "The current Kaggle worker still runs Wan2.1 T2V and does not "
+            "consume reference images as model conditioning."
+        )
+    elif project_has_characters:
+        status = "blocked_missing_character_assets"
+        reason = (
+            "The project contains characters, but no registered character "
+            "reference manifest was supplied. No reference plan was created."
+        )
+    else:
+        status = "text_to_video_no_character_references"
+        reason = (
+            "The project has no characters. A reference image plan is "
+            "not required for this project."
+        )
+
+    _write_json(
+        status_path,
+        {
+            "schema_version": 1,
+            "status": status,
+            "reference_plan_path": plan_path,
+            "current_worker_engine": "Wan2.1-T2V-1.3B",
+            "reference_images_consumed_by_worker": False,
+            "vace_runtime_integrated": False,
+            "reason": reason,
+        },
+    )
+
+    return status_path.relative_to(job.workspace).as_posix()
+
+
 def register_wan_output(
     project_data: Mapping[str, Any],
     workspace: str | Path,
@@ -310,7 +379,7 @@ def register_wan_output(
     report_path: str | Path,
     character_assets_dir: str | Path | None = None,
 ) -> ProductionJob:
-    """Register validated Wan outputs and optional character reference assets."""
+    """Register Wan outputs, character assets and reference plan artifacts."""
 
     project = _load_project(project_data)
     job = ProductionJob.create(workspace, project.to_dict())
@@ -364,7 +433,8 @@ def register_wan_output(
         ],
     )
 
-    # Projects without characters do not need a character-image stage.
+    reference_plan_path = None
+
     if not project.characters:
         not_required_path = (
             input_dir / "character_assets_not_required.json"
@@ -387,12 +457,22 @@ def register_wan_output(
             ],
         )
 
+        reference_plan_path = _create_reference_plan(
+            project,
+            job,
+        )
+
     elif character_assets_dir is not None:
         job.start_stage("character_assets")
 
         character_artifacts = _register_character_assets(
             project,
             character_assets_dir,
+            job,
+        )
+
+        reference_plan_path = _create_reference_plan(
+            project,
             job,
         )
 
@@ -404,7 +484,12 @@ def register_wan_output(
             ],
         )
 
-    # Without a real manifest, character_assets remains pending.
+    runtime_status_path = _write_reference_runtime_status(
+        job,
+        plan_path=reference_plan_path,
+        project_has_characters=bool(project.characters),
+    )
+
     final_video = wan_dir / "final-film.mp4"
     performance_report = wan_dir / "performance_report.json"
 
@@ -425,13 +510,19 @@ def register_wan_output(
             "Wan performance report must contain a JSON object."
         )
 
+    video_artifacts = [
+        "artifacts/wan/final-film.mp4",
+        "artifacts/wan/performance_report.json",
+        runtime_status_path,
+    ]
+
+    if reference_plan_path:
+        video_artifacts.append(reference_plan_path)
+
     job.start_stage("video_generation")
     job.complete_stage(
         "video_generation",
-        [
-            "artifacts/wan/final-film.mp4",
-            "artifacts/wan/performance_report.json",
-        ],
+        video_artifacts,
     )
 
     return ProductionJob.open(job.workspace)
@@ -480,6 +571,20 @@ def main() -> None:
             f"{stage}:",
             manifest["stages"][stage]["status"],
         )
+
+    status_path = (
+        job.workspace
+        / "artifacts"
+        / "wan"
+        / "reference_runtime_status.json"
+    )
+
+    if status_path.is_file():
+        status = json.loads(
+            status_path.read_text(encoding="utf-8")
+        )
+        print("Reference runtime:", status["status"])
+        print("VACE runtime integrated:", status["vace_runtime_integrated"])
 
 
 if __name__ == "__main__":
