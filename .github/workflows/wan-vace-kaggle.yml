@@ -1462,6 +1462,7 @@ jobs:
             output/final-film.mp4
             output/**/*.mp4
             output/audio_runtime_report.json
+            output/audio_mix_report.json
             output/final-film.srt
             output/performance_report.json
             output/reference_runtime_status.json
