@@ -1,3 +1,4 @@
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -155,16 +156,17 @@ class WanAudioPostprocessTests(unittest.TestCase):
                 ],
                 "scenes": [
                     {
-                        "scene_number": 1,
-                        "description": "Gece vakti şehir",
-                        "narration": "Şehir sessizliğe gömülmüştü.",
+                        "scene_id": f"scene_{i}",
+                        "visual_subject": "Gece vakti şehir",
+                        "narration": f"Şehir sessizliğe gömülmüştü. Sahne {i}.",
                         "dialogue_turns": [
                             {
                                 "speaker": "ali",
-                                "text": "Burada ne oldu?",
+                                "text": f"Burada ne oldu? Sahne {i}.",
                             }
                         ],
                     }
+                    for i in range(1, 9)
                 ],
             },
             topic="Son Işık",
