@@ -364,21 +364,22 @@ jobs:
               performance_recorder = PerformanceRecorder(
                   WORK,
                   project_title=topic,
-                  profile="Wan2.1-T2V-1.3B / NvidiaTeslaT4",
+                  profile="Wan2.1-VACE-1.3B / NvidiaTeslaT4",
               )
 
               output_dir = WORK / "film_output"
               output_dir.mkdir(parents=True, exist_ok=True)
 
-              # Character reference images are validated here. The current
-              # WanT2V pipeline remains text-to-video; validation is NOT
-              # equivalent to image conditioning or identity consistency.
+              # Verified per-scene reference images are passed to WanVace.
+              verified_bundle = None
+              conditioning_scenes = 0
               reference_status = {
                   "status": "not_required",
                   "images_verified": 0,
                   "scene_references_verified": 0,
                   "conditioning_applied": False,
-                  "engine": "Wan2.1-T2V-1.3B",
+                  "conditioning_scenes": 0,
+                  "engine": "Wan2.1-VACE-1.3B",
               }
 
               if request.get("reference_bundle_required", False):
@@ -403,14 +404,21 @@ jobs:
                   verified_bundle = load_reference_bundle(manifests[0].parent)
                   validation = verified_bundle["runtime_validation"]
 
+                  if len(verified_bundle.get("scenes", [])) != len(scenes):
+                      raise RuntimeError(
+                          "Referans paketi sahne sayısı film projesiyle eşleşmiyor."
+                      )
+                  if validation.get("images_verified", 0) < 1:
+                      raise RuntimeError(
+                          "VACE için doğrulanmış karakter referans görseli bulunamadı."
+                      )
+
                   reference_status = {
                       **validation,
                       "conditioning_applied": False,
-                      "engine": "Wan2.1-T2V-1.3B",
-                      "note": (
-                          "Referans görseller ve sahne eşleştirmeleri doğrulandı. "
-                          "Mevcut T2V modeline görüntü koşullandırması uygulanmadı."
-                      ),
+                      "conditioning_scenes": 0,
+                      "engine": "Wan2.1-VACE-1.3B",
+                      "note": "Referanslar doğrulandı; üretimde VACE koşullandırması uygulanacak.",
                   }
 
               (output_dir / "reference_runtime_status.json").write_text(
@@ -471,7 +479,7 @@ jobs:
               from huggingface_hub import snapshot_download
 
               model_dir = snapshot_download(
-                  repo_id="Wan-AI/Wan2.1-T2V-1.3B"
+                  repo_id="Wan-AI/Wan2.1-VACE-1.3B"
               )
 
               print("Model hazır:", model_dir, flush=True)
@@ -647,7 +655,7 @@ jobs:
               from wan.configs import WAN_CONFIGS, SIZE_CONFIGS
               from wan.utils.utils import cache_video
 
-              cfg = WAN_CONFIGS["t2v-1.3B"]
+              cfg = WAN_CONFIGS["vace-1.3B"]
 
               performance_recorder.capture_gpu(torch)
 
@@ -658,7 +666,7 @@ jobs:
 
               model_load_started = time.perf_counter()
 
-              pipeline = wan.WanT2V(
+              pipeline = wan.WanVace(
                   config=cfg,
                   checkpoint_dir=model_dir,
                   device_id=0,
@@ -686,39 +694,67 @@ jobs:
                   scene_started = time.perf_counter()
                   scene_file = output_dir / f"scene_{index:02d}.mp4"
 
+                  scene_reference = (
+                      verified_bundle["scenes"][index - 1]
+                      if verified_bundle is not None else None
+                  )
+                  reference_paths = (
+                      [
+                          item["local_path"]
+                          for item in scene_reference.get("reference_images", [])
+                      ]
+                      if scene_reference is not None else []
+                  )
+                  scene_description = (
+                      scene_reference.get("visual_prompt", "").strip()
+                      if scene_reference is not None else ""
+                  ) or scene
+
                   final_prompt = (
-                      f"{scene}. "
-                      f"Main story brief and creative direction: "
-                      f"{request['prompt']}. "
+                      f"{scene_description}. "
+                      f"Main story brief and creative direction: {request['prompt']}. "
                       f"Story context: {topic}. "
-                      f"Character continuity reference: "
-                      f"{character_bible}. "
+                      f"Character continuity reference: {character_bible}. "
                       f"Visual style: {style}. "
-                      "Maintain the same character appearance, "
-                      "clothing, facial features and environment "
-                      "throughout this story. "
-                      "Cinematic composition, natural body movement, "
-                      "coherent physical action, detailed environment, "
-                      "professional film lighting."
+                      "Preserve supplied reference identity, face, hairstyle, "
+                      "clothing and proportions. Maintain continuity across scenes. "
+                      "Cinematic composition, natural body movement, coherent "
+                      "physical action, detailed environment, professional film lighting."
                   )
 
                   print(
-                      f"SAHNE {index}/{len(scenes)} ÜRETİLİYOR "
+                      f"SAHNE {index}/{len(scenes)} VACE İLE ÜRETİLİYOR "
                       "(81 kare / yaklaşık 5 saniye)",
                       flush=True
                   )
 
+                  source_video, source_mask, source_references = pipeline.prepare_source(
+                      [None],
+                      [None],
+                      [reference_paths or None],
+                      81,
+                      SIZE_CONFIGS["832*480"],
+                      torch.device("cuda:0"),
+                  )
+
                   video = pipeline.generate(
                       input_prompt=final_prompt,
+                      input_frames=source_video,
+                      input_masks=source_mask,
+                      input_ref_images=source_references,
                       size=SIZE_CONFIGS["832*480"],
                       frame_num=81,
-                      shift=8,
+                      context_scale=1.0,
+                      shift=5.0,
                       sample_solver="unipc",
                       sampling_steps=8,
-                      guide_scale=6,
+                      guide_scale=6.0,
                       seed=-1,
                       offload_model=True,
                   )
+
+                  if reference_paths:
+                      conditioning_scenes += 1
 
                   torch.cuda.synchronize()
 
@@ -766,6 +802,21 @@ jobs:
                       f"{scene_file.stat().st_size} byte | "
                       f"{scene_elapsed:.1f} saniye",
                       flush=True
+                  )
+
+              if verified_bundle is not None:
+                  if conditioning_scenes < 1:
+                      raise RuntimeError(
+                          "Referans paketi bağlı ancak hiçbir sahnede VACE koşullandırması uygulanmadı."
+                      )
+                  reference_status.update(
+                      conditioning_applied=True,
+                      conditioning_scenes=conditioning_scenes,
+                      note="WanVace.generate doğrulanmış sahne referanslarıyla çağrıldı.",
+                  )
+                  (output_dir / "reference_runtime_status.json").write_text(
+                      json.dumps(reference_status, ensure_ascii=False, indent=2),
+                      encoding="utf-8",
                   )
 
               print("10. Videolar birleştiriliyor", flush=True)
@@ -1062,7 +1113,10 @@ jobs:
               'Path("/kaggle/input")',
               "load_reference_bundle(manifests[0].parent)",
               "reference_runtime_status.json",
-              '"conditioning_applied": False',
+              "pipeline.prepare_source(",
+              "input_ref_images=source_references",
+              "conditioning_scenes += 1",
+              "conditioning_applied=True",
           ]
 
           for fragment in required_reference_fragments:
@@ -1113,7 +1167,7 @@ jobs:
           model_path = repo / "wan/modules/model.py"
           attention_path = repo / "wan/modules/attention.py"
           shared_path = repo / "wan/configs/shared_config.py"
-          text2video_path = repo / "wan/text2video.py"
+          vace_path = repo / "wan/vace.py"
           config_path = repo / "wan/configs/__init__.py"
 
           model_source = model_path.read_text(encoding="utf-8")
@@ -1136,8 +1190,8 @@ jobs:
                   "wan_shared_cfg.param_dtype = torch.bfloat16",
               "832x480 size preset":
                   "'832*480': (832, 480)",
-              "1.3B text-to-video config":
-                  "'t2v-1.3B': t2v_1_3B",
+              "1.3B VACE config":
+                  "'vace-1.3B': t2v_1_3B",
           }
 
           sources = {
@@ -1148,7 +1202,7 @@ jobs:
               "T5 dtype setting": shared_source,
               "DiT dtype setting": shared_source,
               "832x480 size preset": config_source,
-              "1.3B text-to-video config": config_source,
+              "1.3B VACE config": config_source,
           }
 
           for label, fragment in required_fragments.items():
@@ -1157,24 +1211,27 @@ jobs:
                       "Wan kaynak kodu uyumsuz: " + label
                   )
 
-          text2video_tree = ast.parse(
-              text2video_path.read_text(encoding="utf-8"),
-              filename=str(text2video_path)
+          vace_tree = ast.parse(
+              vace_path.read_text(encoding="utf-8"),
+              filename=str(vace_path)
           )
 
-          wan_t2v = next(
-              node for node in text2video_tree.body
-              if isinstance(node, ast.ClassDef) and node.name == "WanT2V"
+          wan_vace = next(
+              (node for node in vace_tree.body
+               if isinstance(node, ast.ClassDef) and node.name == "WanVace"),
+              None
           )
+          if wan_vace is None:
+              raise SystemExit("WanVace sınıfı bulunamadı.")
 
           methods = {
               node.name: node
-              for node in wan_t2v.body
+              for node in wan_vace.body
               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
           }
 
-          if not {"__init__", "generate"}.issubset(methods):
-              raise SystemExit("WanT2V constructor/generate API bulunamadı.")
+          if not {"__init__", "prepare_source", "generate"}.issubset(methods):
+              raise SystemExit("WanVace constructor/prepare_source/generate API bulunamadı.")
 
           def argument_names(function):
               return {
@@ -1190,9 +1247,15 @@ jobs:
               "t5_fsdp", "dit_fsdp", "use_usp", "t5_cpu"
           }
 
+          prepare_required = {
+              "src_video", "src_mask", "src_ref_images",
+              "num_frames", "image_size", "device"
+          }
+
           generate_required = {
-              "input_prompt", "size", "frame_num", "shift",
-              "sample_solver", "sampling_steps", "guide_scale",
+              "input_prompt", "input_frames", "input_masks",
+              "input_ref_images", "size", "frame_num", "context_scale",
+              "shift", "sample_solver", "sampling_steps", "guide_scale",
               "seed", "offload_model"
           }
 
@@ -1201,15 +1264,20 @@ jobs:
           ):
               raise SystemExit("WanT2V constructor parametreleri değişmiş.")
 
+          if not prepare_required.issubset(
+              argument_names(methods["prepare_source"])
+          ):
+              raise SystemExit("WanVace prepare_source parametreleri değişmiş.")
+
           if not generate_required.issubset(
               argument_names(methods["generate"])
           ):
-              raise SystemExit("WanT2V generate parametreleri değişmiş.")
+              raise SystemExit("WanVace generate parametreleri değişmiş.")
 
           print("Wan attention yama noktaları: OK")
           print("Wan FP16 yapılandırma noktaları: OK")
-          print("Wan 832x480 / T2V 1.3B profili: OK")
-          print("WanT2V Python API: OK")
+          print("Wan 832x480 / VACE 1.3B profili: OK")
+          print("WanVace Python API: OK")
           PY
 
       - name: Ön kontrol modunu tamamla
