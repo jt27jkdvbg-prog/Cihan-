@@ -8,7 +8,7 @@ from typing import Any, Mapping
 from film_project import validate_film_project
 from pipeline_config import FilmProject, ProjectConfigError
 from project_adapter import pipeline_project_to_legacy
-
+from copy import deepcopy
 
 def normalize_wan_project(data: Mapping[str, Any]) -> dict[str, Any]:
     """Accept either project schema and return validated legacy Wan data."""
@@ -34,7 +34,14 @@ def normalize_wan_project(data: Mapping[str, Any]) -> dict[str, Any]:
             "Wan project validation failed: "
             + "; ".join(report["errors"])
         )
+    # Preserve audio and cost settings from modern projects.
+    if isinstance(candidate.get("audio"), Mapping):
+        legacy_project["audio"] = deepcopy(candidate["audio"])
+    elif isinstance(candidate.get("audio_settings"), Mapping):
+        legacy_project["audio"] = deepcopy(candidate["audio_settings"])
 
+    if isinstance(candidate.get("cost_policy"), Mapping):
+        legacy_project["cost_policy"] = deepcopy(candidate["cost_policy"])
     return legacy_project
 
 
