@@ -398,7 +398,7 @@ jobs:
                   worker_dir = Path(__file__).resolve().parent
                   sys.path.insert(0, str(worker_dir))
 
-                  from wan_kaggle_reference_loader import load_reference_bundle
+                                    # load_reference_bundle worker.py içine gömülüdür.
 
                   input_root = Path("/kaggle/input")
                   if not input_root.is_dir():
@@ -966,24 +966,34 @@ jobs:
               1
           )
 
-          Path("kaggle-worker/worker.py").write_text(
-              worker,
-              encoding="utf-8"
-          )
-
-          loader_source = Path("wan_kaggle_reference_loader.py")
+                    loader_source = Path("wan_kaggle_reference_loader.py")
 
           if not loader_source.is_file():
               raise FileNotFoundError(
                   "wan_kaggle_reference_loader.py bulunamadı."
               )
 
-          Path("kaggle-worker/wan_kaggle_reference_loader.py").write_text(
-              loader_source.read_text(encoding="utf-8"),
+          loader_text = loader_source.read_text(encoding="utf-8")
+
+          loader_text = loader_text.replace(
+              "from __future__ import annotations\n",
+              "",
+              1
+          )
+
+          worker = loader_text + "\n\n" + worker
+
+          Path("kaggle-worker/worker.py").write_text(
+              worker,
               encoding="utf-8"
           )
 
-          print("Kaggle referans doğrulama modülü Worker'a eklendi.")
+          Path("kaggle-worker/wan_kaggle_reference_loader.py").write_text(
+              loader_text,
+              encoding="utf-8"
+          )
+
+          print("Referans yükleyici worker.py içine gömüldü.")
 
           print("Sahne sayısı:", len(scenes))
           print("Worker ve metadata hazır.")
@@ -1133,7 +1143,7 @@ jobs:
           ]
 
           required_reference_fragments = [
-              "from wan_kaggle_reference_loader import load_reference_bundle",
+              "def load_reference_bundle(",
               'Path("/kaggle/input")',
               "load_reference_bundle(manifests[0].parent)",
               "reference_runtime_status.json",
