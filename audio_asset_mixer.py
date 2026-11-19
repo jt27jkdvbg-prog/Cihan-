@@ -10,8 +10,10 @@ def _duration(value):
         value = float(value)
     except (TypeError, ValueError):
         raise ValueError("Geçersiz film süresi.")
+
     if value <= 0:
         raise ValueError("Film süresi sıfırdan büyük olmalı.")
+
     return value
 
 
@@ -27,15 +29,21 @@ def _asset(asset, name):
     path = Path(str(asset.get("path", "")))
 
     if not path.is_file():
-        raise FileNotFoundError(f"Ses dosyası bulunamadı: {path}")
+        raise FileNotFoundError(
+            f"Ses dosyası bulunamadı: {path}"
+        )
 
     try:
         volume = float(asset.get("volume", 0.2))
     except (TypeError, ValueError):
-        raise ValueError(f"{name}: ses seviyesi geçersiz.")
+        raise ValueError(
+            f"{name}: ses seviyesi geçersiz."
+        )
 
     if not 0 <= volume <= 1:
-        raise ValueError(f"{name}: ses seviyesi 0-1 arasında olmalı.")
+        raise ValueError(
+            f"{name}: ses seviyesi 0-1 arasında olmalı."
+        )
 
     return path, volume
 
@@ -50,8 +58,13 @@ def mix_audio_layers(
     sample_rate=48000,
     loudness_lufs=-16.0,
     true_peak_db=-1.5,
+    music_ducking=True,
 ):
-    """Konuşma, müzik, ortam ve efektleri tek ses dosyasında birleştirir."""
+    """
+    Konuşma, müzik, ortam ve efektleri tek ses dosyasında birleştirir.
+
+    Bütün harici ses dosyalarının kullanım lisansı doğrulanmış olmalıdır.
+    """
 
     if not shutil.which("ffmpeg"):
         raise RuntimeError("FFmpeg bulunamadı.")
@@ -60,10 +73,19 @@ def mix_audio_layers(
     voice = Path(voice_path)
 
     if not voice.is_file():
-        raise FileNotFoundError(f"Konuşma sesi bulunamadı: {voice}")
+        raise FileNotFoundError(
+            f"Konuşma sesi bulunamadı: {voice}"
+        )
 
     if sample_rate not in (44100, 48000):
-        raise ValueError("Desteklenmeyen örnekleme frekansı.")
+        raise ValueError(
+            "Desteklenmeyen örnekleme frekansı."
+        )
+
+    if not isinstance(music_ducking, bool):
+        raise ValueError(
+            "music_ducking değeri boolean olmalı."
+        )
 
     effects = effects or []
 
@@ -73,17 +95,17 @@ def mix_audio_layers(
     assets = []
 
     if music is not None:
-        assets.append(("music", music, 0))
+        assets.append(("music", music))
 
     if ambience is not None:
-        assets.append(("ambience", ambience, 0))
+        assets.append(("ambience", ambience))
 
     for index, effect in enumerate(effects):
-        assets.append((f"effect_{index}", effect, index))
+        assets.append((f"effect_{index}", effect))
 
     validated = []
 
-    for name, item, _ in assets:
+    for name, item in assets:
         path, volume = _asset(item, name)
 
         offset = 0.0
@@ -92,29 +114,51 @@ def mix_audio_layers(
             try:
                 offset = float(item.get("offset", 0))
             except (TypeError, ValueError):
-                raise ValueError(f"{name}: efekt başlangıç zamanı geçersiz.")
+                raise ValueError(
+                    f"{name}: efekt başlangıç zamanı geçersiz."
+                )
 
             if not 0 <= offset < duration:
-                raise ValueError(f"{name}: efekt film süresinin dışında.")
+                raise ValueError(
+                    f"{name}: efekt film süresinin dışında."
+                )
 
-        validated.append((name, path, volume, offset))
+        validated.append(
+            (name, path, volume, offset)
+        )
 
     output = Path(output_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
+    output.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-    command = ["ffmpeg", "-y", "-i", str(voice)]
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(voice),
+    ]
+
     indexes = {}
 
     for name, path, _, _ in validated:
         if name in ("music", "ambience"):
-            command.extend(["-stream_loop", "-1"])
+            command.extend([
+                "-stream_loop",
+                "-1",
+            ])
 
-        command.extend(["-i", str(path)])
+        command.extend([
+            "-i",
+            str(path),
+        ])
+
         indexes[name] = len(indexes) + 1
 
     filters = [
         f"[0:a]aresample={sample_rate},"
-        f"aformat=channel_layouts=stereo,"
+        "aformat=channel_layouts=stereo,"
         f"apad,atrim=0:{duration:.6f},"
         "asetpts=PTS-STARTPTS[voice]"
     ]
@@ -129,21 +173,23 @@ def mix_audio_layers(
         if name == "music":
             filters.append(
                 f"[{index}:a]aresample={sample_rate},"
-                f"aformat=channel_layouts=stereo,"
+                "aformat=channel_layouts=stereo,"
                 f"volume={volume},"
                 f"atrim=0:{duration:.6f},"
                 f"asetpts=PTS-STARTPTS[music]"
             )
+
             has_music = True
 
         elif name == "ambience":
             filters.append(
                 f"[{index}:a]aresample={sample_rate},"
-                f"aformat=channel_layouts=stereo,"
+                "aformat=channel_layouts=stereo,"
                 f"volume={volume},"
                 f"atrim=0:{duration:.6f},"
                 f"asetpts=PTS-STARTPTS[ambience]"
             )
+
             mix_inputs.append("[ambience]")
 
         else:
@@ -151,22 +197,27 @@ def mix_audio_layers(
 
             filters.append(
                 f"[{index}:a]aresample={sample_rate},"
-                f"aformat=channel_layouts=stereo,"
+                "aformat=channel_layouts=stereo,"
                 f"volume={volume},"
                 f"adelay={delay}|{delay},"
-                f"apad,atrim=0:{duration:.6f},"
+                "apad,"
+                f"atrim=0:{duration:.6f},"
                 f"asetpts=PTS-STARTPTS[{label}]"
             )
 
             mix_inputs.append(f"[{label}]")
 
-    if has_music:
+    if has_music and music_ducking:
         filters.append(
             "[music][voice]sidechaincompress="
             "threshold=0.025:ratio=8:attack=20:release=450"
             "[ducked_music]"
         )
+
         mix_inputs.append("[ducked_music]")
+
+    elif has_music:
+        mix_inputs.append("[music]")
 
     filters.append(
         "".join(mix_inputs)
@@ -181,12 +232,18 @@ def mix_audio_layers(
     command.extend([
         "-filter_complex",
         ";".join(filters),
-        "-map", "[mix]",
-        "-c:a", "aac",
-        "-b:a", "256k",
-        "-ar", str(sample_rate),
-        "-ac", "2",
-        "-t", str(duration),
+        "-map",
+        "[mix]",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "256k",
+        "-ar",
+        str(sample_rate),
+        "-ac",
+        "2",
+        "-t",
+        str(duration),
         str(output),
     ])
 
@@ -197,8 +254,13 @@ def mix_audio_layers(
         text=True,
     )
 
-    if not output.is_file() or output.stat().st_size == 0:
-        raise RuntimeError("Ses miksajı oluşturulamadı.")
+    if (
+        not output.is_file()
+        or output.stat().st_size == 0
+    ):
+        raise RuntimeError(
+            "Ses miksajı oluşturulamadı."
+        )
 
     return {
         "output": str(output),
@@ -206,16 +268,27 @@ def mix_audio_layers(
         "layers": ["dialogue"] + [
             item[0] for item in validated
         ],
-        "music_ducking": has_music,
+        "music_ducking": bool(
+            has_music and music_ducking
+        ),
         "licence_verified": True,
     }
 
 
 def write_mix_report(path, report):
     target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
+
+    target.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     target.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2),
+        json.dumps(
+            report,
+            ensure_ascii=False,
+            indent=2,
+        ),
         encoding="utf-8",
     )
+
