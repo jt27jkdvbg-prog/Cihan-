@@ -50,17 +50,17 @@ jobs:
         with:
           python-version: "3.11"
 
+      
       - name: Kaggle CLI kur
-        if: ${{ inputs.run_mode == 'production' }}
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          pip install --upgrade kaggle six
+          pip install --upgrade kaggle
 
-      - name: Kaggle kimlik doğrulama
-        if: ${{ inputs.run_mode == 'production' }}
+      - name: Kaggle kimlik doğrulama ve bağlantı testi
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
         run: |
           set -euo pipefail
 
@@ -69,11 +69,20 @@ jobs:
             exit 1
           fi
 
+          if [ -z "$KAGGLE_USERNAME" ]; then
+            echo "KAGGLE_USERNAME eksik."
+            exit 1
+          fi
+
           mkdir -p ~/.kaggle
           printf '%s' "$KAGGLE_API_TOKEN" > ~/.kaggle/access_token
           chmod 600 ~/.kaggle/access_token
 
+          echo "Kaggle API bağlantısı test ediliyor..."
           kaggle kernels list --mine
+
+          echo "KAGGLE_AUTH_CHECK=SUCCESS"
+
 
       - name: Film projesini doğrula ve Worker hazırla
         env:
