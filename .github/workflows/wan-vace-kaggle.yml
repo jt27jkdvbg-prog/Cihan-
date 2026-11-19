@@ -55,7 +55,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          pip install --upgrade kaggle
+          pip install --upgrade kaggle six
 
       - name: Kaggle kimlik doğrulama ve bağlantı testi
         env:
