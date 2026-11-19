@@ -1,14 +1,33 @@
 
+import hashlib
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from production_orchestrator import ProductionJob
-from wan_orchestrator_bridge import register_wan_output
+from wan_orchestrator_bridge import (
+    CharacterAssetRegistrationError,
+    register_wan_output,
+)
 
 
-def make_project():
+def make_project(with_character=False):
+    characters = []
+    character_ids = []
+
+    if with_character:
+        characters = [
+            {
+                "id": "main-hero",
+                "name": "Main Hero",
+                "visual_description": "A fictional adult character.",
+                "appearance": "Short dark hair.",
+                "clothing": "Dark blue jacket.",
+            }
+        ]
+        character_ids = ["main-hero"]
+
     return {
         "project_id": "wan-bridge-test-001",
         "title": "Wan Bridge Test",
@@ -17,14 +36,14 @@ def make_project():
         "visual_style": "cinematic realistic",
         "profile": "landscape",
         "language": "tr",
-        "characters": [],
+        "characters": characters,
         "scenes": [
             {
                 "id": "scene_1",
                 "order": 1,
                 "duration_seconds": 10,
                 "visual_prompt": "A cinematic city at sunset.",
-                "character_ids": [],
+                "character_ids": character_ids,
             }
         ],
     }
@@ -52,13 +71,53 @@ class WanOrchestratorBridgeTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def register_job(self):
+    def register_job(self, project=None, assets_dir=None):
         return register_wan_output(
-            make_project(),
+            project or make_project(),
             self.workspace,
             self.video,
             self.report,
+            character_assets_dir=assets_dir,
         )
+
+    def make_character_assets(self):
+        root = self.root / "character-assets"
+        character_dir = root / "main-hero"
+        character_dir.mkdir(parents=True)
+
+        image = character_dir / "anchor.jpg"
+        image.write_bytes(
+            b"\xff\xd8\xff" + (b"character-image-data" * 500)
+        )
+
+        manifest = {
+            "schema_version": 1,
+            "project_id": "wan-bridge-test-001",
+            "project_title": "Wan Bridge Test",
+            "asset_count": 1,
+            "all_assets_validated": True,
+            "assets": [
+                {
+                    "character_id": "main-hero",
+                    "character_name": "Main Hero",
+                    "asset_type": "canonical_character_anchor",
+                    "path": "main-hero/anchor.jpg",
+                    "engine": "fal",
+                    "bytes": image.stat().st_size,
+                    "sha256": hashlib.sha256(
+                        image.read_bytes()
+                    ).hexdigest(),
+                    "validated": True,
+                }
+            ],
+        }
+
+        (root / "character_assets.json").write_text(
+            json.dumps(manifest),
+            encoding="utf-8",
+        )
+
+        return root, image
 
     def test_registers_real_wan_outputs(self):
         job = self.register_job()
@@ -79,17 +138,8 @@ class WanOrchestratorBridgeTests(unittest.TestCase):
             "succeeded",
         )
 
-        artifacts = manifest["stages"][
-            "video_generation"
-        ]["artifacts"]
-
-        self.assertEqual(len(artifacts), 2)
-
         copied_video = (
-            self.workspace
-            / "artifacts"
-            / "wan"
-            / "final-film.mp4"
+            self.workspace / "artifacts" / "wan" / "final-film.mp4"
         )
 
         copied_report = (
@@ -105,97 +155,189 @@ class WanOrchestratorBridgeTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            json.loads(
-                copied_report.read_text(encoding="utf-8")
-            ),
-            {
-                "status": "completed",
-                "scenes": [],
-            },
+            json.loads(copied_report.read_text(encoding="utf-8")),
+            {"status": "completed", "scenes": []},
         )
 
         self.assertEqual(job.verify_artifacts(), [])
 
-    def test_character_assets_remain_pending(self):
+    def test_character_stage_is_not_required_for_empty_project(self):
         job = self.register_job()
-        manifest = job.manifest
 
         self.assertEqual(
-            manifest["stages"]["character_assets"]["status"],
-            "pending",
+            job.manifest["stages"]["character_assets"]["status"],
+            "succeeded",
         )
 
-    def test_character_definitions_are_saved_as_input_only(self):
-        job = self.register_job()
-
-        definitions_path = (
-            job.workspace
+        marker = (
+            self.workspace
             / "artifacts"
             / "inputs"
-            / "character_definitions.json"
+            / "character_assets_not_required.json"
         )
 
-        self.assertTrue(definitions_path.is_file())
+        self.assertTrue(marker.is_file())
 
-        definitions = json.loads(
-            definitions_path.read_text(encoding="utf-8")
+        data = json.loads(marker.read_text(encoding="utf-8"))
+        self.assertEqual(data["status"], "not_required")
+
+    def test_character_assets_are_registered_when_valid(self):
+        assets_dir, _ = self.make_character_assets()
+
+        job = self.register_job(
+            project=make_project(with_character=True),
+            assets_dir=assets_dir,
         )
 
-        self.assertEqual(definitions, [])
+        stage = job.manifest["stages"]["character_assets"]
+
+        self.assertEqual(stage["status"], "succeeded")
+        self.assertEqual(len(stage["artifacts"]), 2)
+
+        copied_manifest = (
+            self.workspace
+            / "artifacts"
+            / "character_assets"
+            / "character_assets.json"
+        )
+
+        self.assertTrue(copied_manifest.is_file())
+
+        copied_data = json.loads(
+            copied_manifest.read_text(encoding="utf-8")
+        )
+
+        self.assertTrue(
+            copied_data["registered_in_production_job"]
+        )
+
+        copied_image = (
+            self.workspace
+            / copied_data["assets"][0]["path"]
+        )
+
+        self.assertTrue(copied_image.is_file())
+        self.assertEqual(job.verify_artifacts(), [])
+
+    def test_character_assets_remain_pending_without_manifest(self):
+        job = self.register_job(
+            project=make_project(with_character=True)
+        )
 
         self.assertEqual(
             job.manifest["stages"]["character_assets"]["status"],
             "pending",
         )
 
+    def test_invalid_character_hash_is_rejected(self):
+        assets_dir, _ = self.make_character_assets()
+
+        manifest_path = assets_dir / "character_assets.json"
+        manifest = json.loads(
+            manifest_path.read_text(encoding="utf-8")
+        )
+        manifest["assets"][0]["sha256"] = "0" * 64
+
+        manifest_path.write_text(
+            json.dumps(manifest),
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(CharacterAssetRegistrationError):
+            self.register_job(
+                project=make_project(with_character=True),
+                assets_dir=assets_dir,
+            )
+
+    def test_missing_character_image_is_rejected(self):
+        assets_dir, image = self.make_character_assets()
+        image.unlink()
+
+        with self.assertRaises(CharacterAssetRegistrationError):
+            self.register_job(
+                project=make_project(with_character=True),
+                assets_dir=assets_dir,
+            )
+
+    def test_wrong_character_id_is_rejected(self):
+        assets_dir, _ = self.make_character_assets()
+
+        manifest_path = assets_dir / "character_assets.json"
+        manifest = json.loads(
+            manifest_path.read_text(encoding="utf-8")
+        )
+        manifest["assets"][0]["character_id"] = "unexpected"
+
+        manifest_path.write_text(
+            json.dumps(manifest),
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(CharacterAssetRegistrationError):
+            self.register_job(
+                project=make_project(with_character=True),
+                assets_dir=assets_dir,
+            )
+
+    def test_unsafe_character_asset_path_is_rejected(self):
+        assets_dir, _ = self.make_character_assets()
+
+        manifest_path = assets_dir / "character_assets.json"
+        manifest = json.loads(
+            manifest_path.read_text(encoding="utf-8")
+        )
+        manifest["assets"][0]["path"] = "../outside.jpg"
+
+        manifest_path.write_text(
+            json.dumps(manifest),
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(CharacterAssetRegistrationError):
+            self.register_job(
+                project=make_project(with_character=True),
+                assets_dir=assets_dir,
+            )
+
     def test_audio_and_post_production_remain_pending(self):
         job = self.register_job()
         manifest = job.manifest
 
-        self.assertEqual(
-            manifest["stages"]["audio_generation"]["status"],
-            "pending",
-        )
-
-        self.assertEqual(
-            manifest["stages"]["post_production"]["status"],
-            "pending",
-        )
-
-        self.assertEqual(
-            manifest["stages"]["quality_control"]["status"],
-            "pending",
-        )
-
-        self.assertEqual(
-            manifest["stages"]["publishing"]["status"],
-            "pending",
-        )
+        for stage_name in (
+            "audio_generation",
+            "post_production",
+            "quality_control",
+            "publishing",
+        ):
+            self.assertEqual(
+                manifest["stages"][stage_name]["status"],
+                "pending",
+            )
 
     def test_job_status_is_queued_when_no_stage_is_running(self):
         job = self.register_job()
 
-        self.assertEqual(
-            job.manifest["status"],
-            "queued",
-        )
+        self.assertEqual(job.manifest["status"], "queued")
 
     def test_video_can_complete_without_character_assets(self):
-        job = self.register_job()
-        manifest = job.manifest
+        job = self.register_job(
+            project=make_project(with_character=True)
+        )
 
         self.assertEqual(
-            manifest["stages"]["video_generation"]["status"],
+            job.manifest["stages"]["video_generation"]["status"],
             "succeeded",
         )
 
         self.assertEqual(
-            manifest["stages"]["character_assets"]["status"],
+            job.manifest["stages"]["character_assets"]["status"],
             "pending",
         )
 
     def test_post_production_cannot_start_before_audio_and_assets(self):
-        job = self.register_job()
+        job = self.register_job(
+            project=make_project(with_character=True)
+        )
 
         with self.assertRaises(Exception):
             job.start_stage("post_production")
@@ -227,10 +369,7 @@ class WanOrchestratorBridgeTests(unittest.TestCase):
             )
 
     def test_invalid_performance_report_is_rejected(self):
-        self.report.write_text(
-            "not valid json",
-            encoding="utf-8",
-        )
+        self.report.write_text("not valid json", encoding="utf-8")
 
         with self.assertRaises(ValueError):
             register_wan_output(
@@ -251,7 +390,6 @@ class WanOrchestratorBridgeTests(unittest.TestCase):
 
     def test_job_can_be_reopened_and_artifacts_verified(self):
         self.register_job()
-
         reopened = ProductionJob.open(self.workspace)
 
         self.assertEqual(
@@ -261,12 +399,7 @@ class WanOrchestratorBridgeTests(unittest.TestCase):
 
         self.assertEqual(
             reopened.manifest["stages"]["character_assets"]["status"],
-            "pending",
-        )
-
-        self.assertEqual(
-            reopened.manifest["status"],
-            "queued",
+            "succeeded",
         )
 
         self.assertEqual(reopened.verify_artifacts(), [])
