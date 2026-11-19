@@ -848,6 +848,21 @@ jobs:
               encoding="utf-8"
           )
 
+
+          loader_source = Path("wan_kaggle_reference_loader.py")
+
+          if not loader_source.is_file():
+              raise FileNotFoundError(
+                  "wan_kaggle_reference_loader.py bulunamadı."
+              )
+
+          Path("kaggle-worker/wan_kaggle_reference_loader.py").write_text(
+              loader_source.read_text(encoding="utf-8"),
+              encoding="utf-8"
+          )
+
+          print("Kaggle referans doğrulama modülü Worker'a eklendi.")
+
           print("Sahne sayısı:", len(scenes))
           print("Worker ve metadata hazır.")
           PY
