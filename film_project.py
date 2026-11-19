@@ -3,25 +3,6 @@
 
 Normalizes generated scripts into one stable project structure,
 validates the project, and adapts it to the existing generate.py format.
-
-Visual worker target:
-- Landscape frame: 832x480 (26:15)
-- Frame rate: 16 fps
-
-Audio:
-- Free-first TTS provider order
-- Optional paid xAI/Grok TTS
-- Paid music and sound-effect generation disabled by default
-- Character-specific voice profiles
-- Music, ambience, sound effects and subtitle preferences
-
-Cost policy:
-- Free-only mode by default
-- Paid services require explicit approval
-- Unknown prices block execution
-- Project budget defaults to zero
-
-No API keys or external dependencies belong in this module.
 """
 
 from copy import deepcopy
@@ -40,8 +21,6 @@ PRODUCTION_DEFAULTS = {
     "fps": 16,
 }
 
-# Free-first order. xAI is an optional paid fallback and must not
-# be used unless the production cost policy explicitly permits it.
 DEFAULT_AUDIO_SETTINGS = {
     "enabled": True,
     "tts_provider_order": ["gemini", "edge", "gtts"],
@@ -56,6 +35,8 @@ DEFAULT_AUDIO_SETTINGS = {
         "provider": "licensed_library",
         "model": "",
         "prompt": "",
+        "asset_path": "",
+        "license_verified": False,
         "volume": 0.18,
         "ducking": True,
     },
@@ -63,6 +44,8 @@ DEFAULT_AUDIO_SETTINGS = {
         "enabled": False,
         "provider": "licensed_library",
         "prompt": "",
+        "asset_path": "",
+        "license_verified": False,
         "volume": 0.22,
     },
     "sound_effects": {
@@ -93,8 +76,6 @@ DEFAULT_COST_POLICY = {
     "record_actual_costs": True,
 }
 
-# This is a classification, not a live price quote.
-# Exact prices and quotas must be checked by the production cost checker.
 SERVICE_COST_CATALOG = {
     "gemini_tts": {
         "category": "free_quota",
@@ -193,7 +174,6 @@ def _normalize_cost_policy(raw_policy=None):
 
     result["mode"] = mode
 
-    # A project cannot silently enable paid services.
     requested_paid = bool(
         raw.get("paid_services_allowed", result["paid_services_allowed"])
     )
@@ -203,7 +183,6 @@ def _normalize_cost_policy(raw_policy=None):
     else:
         result["paid_services_allowed"] = requested_paid
 
-    # Approval and price checks remain mandatory for paid services.
     result["require_approval"] = True
     result["show_cost_before_run"] = True
     result["block_unknown_prices"] = True
@@ -239,7 +218,7 @@ def _normalize_cost_policy(raw_policy=None):
 
 
 def _normalize_audio_settings(raw_audio=None):
-    """Create a complete, free-first audio-settings object."""
+    """Create complete, free-first audio settings and preserve local assets."""
     raw = raw_audio if isinstance(raw_audio, dict) else {}
     result = deepcopy(DEFAULT_AUDIO_SETTINGS)
 
@@ -254,16 +233,10 @@ def _normalize_audio_settings(raw_audio=None):
     raw_subtitles = raw.get("subtitles")
     if isinstance(raw_subtitles, dict):
         result["subtitles"]["enabled"] = bool(
-            raw_subtitles.get(
-                "enabled",
-                result["subtitles"]["enabled"],
-            )
+            raw_subtitles.get("enabled", result["subtitles"]["enabled"])
         )
         result["subtitles"]["burn_in"] = bool(
-            raw_subtitles.get(
-                "burn_in",
-                result["subtitles"]["burn_in"],
-            )
+            raw_subtitles.get("burn_in", result["subtitles"]["burn_in"])
         )
 
         subtitle_format = _text(
@@ -274,77 +247,58 @@ def _normalize_audio_settings(raw_audio=None):
         if subtitle_format in {"srt", "vtt", "ass"}:
             result["subtitles"]["format"] = subtitle_format
 
-    raw_music = raw.get("music")
-    if isinstance(raw_music, dict):
-        result["music"]["enabled"] = bool(
-            raw_music.get("enabled", result["music"]["enabled"])
+    for section in ("music", "ambience"):
+        raw_section = raw.get(section)
+        if not isinstance(raw_section, dict):
+            continue
+
+        settings = result[section]
+        settings["enabled"] = bool(
+            raw_section.get("enabled", settings["enabled"])
         )
-        result["music"]["provider"] = _text(
-            raw_music.get("provider"),
-            result["music"]["provider"],
+        settings["provider"] = _text(
+            raw_section.get("provider"), settings["provider"]
         ).lower()
-        result["music"]["model"] = _text(
-            raw_music.get("model"),
-            result["music"]["model"],
+        settings["volume"] = _clamp_float(
+            raw_section.get("volume"), settings["volume"], 0.0, 1.0
         )
-        result["music"]["prompt"] = _text(
-            raw_music.get("prompt"),
-            result["music"]["prompt"],
+        settings["asset_path"] = _text(
+            raw_section.get("asset_path"),
+            settings.get("asset_path", ""),
         )
-        result["music"]["volume"] = _clamp_float(
-            raw_music.get("volume"),
-            result["music"]["volume"],
-            0.0,
-            1.0,
-        )
-        result["music"]["ducking"] = bool(
-            raw_music.get("ducking", result["music"]["ducking"])
+        settings["license_verified"] = (
+            raw_section.get("license_verified") is True
         )
 
-    raw_ambience = raw.get("ambience")
-    if isinstance(raw_ambience, dict):
-        result["ambience"]["enabled"] = bool(
-            raw_ambience.get(
-                "enabled",
-                result["ambience"]["enabled"],
+        if section == "music":
+            settings["model"] = _text(
+                raw_section.get("model"), settings["model"]
             )
-        )
-        result["ambience"]["provider"] = _text(
-            raw_ambience.get("provider"),
-            result["ambience"]["provider"],
-        ).lower()
-        result["ambience"]["prompt"] = _text(
-            raw_ambience.get("prompt"),
-            result["ambience"]["prompt"],
-        )
-        result["ambience"]["volume"] = _clamp_float(
-            raw_ambience.get("volume"),
-            result["ambience"]["volume"],
-            0.0,
-            1.0,
-        )
+            settings["prompt"] = _text(
+                raw_section.get("prompt"), settings["prompt"]
+            )
+            settings["ducking"] = bool(
+                raw_section.get("ducking", settings["ducking"])
+            )
+        else:
+            settings["prompt"] = _text(
+                raw_section.get("prompt"), settings["prompt"]
+            )
 
     raw_effects = raw.get("sound_effects")
     if isinstance(raw_effects, dict):
-        result["sound_effects"]["enabled"] = bool(
-            raw_effects.get(
-                "enabled",
-                result["sound_effects"]["enabled"],
-            )
+        settings = result["sound_effects"]
+        settings["enabled"] = bool(
+            raw_effects.get("enabled", settings["enabled"])
         )
-        result["sound_effects"]["provider"] = _text(
-            raw_effects.get("provider"),
-            result["sound_effects"]["provider"],
+        settings["provider"] = _text(
+            raw_effects.get("provider"), settings["provider"]
         ).lower()
-        result["sound_effects"]["model"] = _text(
-            raw_effects.get("model"),
-            result["sound_effects"]["model"],
+        settings["model"] = _text(
+            raw_effects.get("model"), settings["model"]
         )
-        result["sound_effects"]["volume"] = _clamp_float(
-            raw_effects.get("volume"),
-            result["sound_effects"]["volume"],
-            0.0,
-            1.0,
+        settings["volume"] = _clamp_float(
+            raw_effects.get("volume"), settings["volume"], 0.0, 1.0
         )
 
     raw_mix = raw.get("mix")
@@ -557,13 +511,38 @@ def build_film_project(
             })
 
         shot_plan = item.get("shot_plan")
-
         if not isinstance(shot_plan, list):
             shot_plan = []
 
         raw_effects = item.get("sound_effects")
         if not isinstance(raw_effects, list):
             raw_effects = []
+
+        normalized_effects = []
+
+        for effect in raw_effects:
+            if isinstance(effect, dict):
+                normalized_effects.append({
+                    **deepcopy(effect),
+                    "asset_path": _text(effect.get("asset_path")),
+                    "license_verified": (
+                        effect.get("license_verified") is True
+                    ),
+                    "volume": _clamp_float(
+                        effect.get("volume", 0.45),
+                        0.45,
+                        0.0,
+                        1.0,
+                    ),
+                    "offset": _clamp_float(
+                        effect.get("offset", 0.0),
+                        0.0,
+                        0.0,
+                        86400.0,
+                    ),
+                })
+            elif _text(effect):
+                normalized_effects.append(_text(effect))
 
         normalized_scenes.append({
             "scene_id": scene_id,
@@ -576,11 +555,7 @@ def build_film_project(
             "image_prompt": _text(item.get("image_prompt")),
             "motion_prompt": _text(item.get("motion_prompt")),
             "sound": _text(item.get("sound")),
-            "sound_effects": [
-                _text(effect)
-                for effect in raw_effects
-                if _text(effect)
-            ],
+            "sound_effects": normalized_effects,
             "ambience": _text(item.get("ambience")),
             "music": _text(item.get("music")),
             "dialogue_turns": turns,
@@ -596,7 +571,6 @@ def build_film_project(
     duration = max(15, min(duration, 180))
 
     raw_audio = source.get("audio")
-
     if not isinstance(raw_audio, dict):
         raw_audio = source.get("audio_settings")
 
@@ -811,6 +785,31 @@ def validate_film_project(project):
             errors.append(
                 f"Scene {index}: sound_effects must be a list."
             )
+        else:
+            for effect_index, effect in enumerate(effects, 1):
+                if isinstance(effect, dict):
+                    volume = effect.get("volume", 0.45)
+                    offset = effect.get("offset", 0.0)
+
+                    if (
+                        isinstance(volume, bool)
+                        or not isinstance(volume, (int, float))
+                        or not 0.0 <= volume <= 1.0
+                    ):
+                        errors.append(
+                            f"Scene {index}, effect {effect_index}: "
+                            "volume must be between 0 and 1."
+                        )
+
+                    if (
+                        isinstance(offset, bool)
+                        or not isinstance(offset, (int, float))
+                        or offset < 0
+                    ):
+                        errors.append(
+                            f"Scene {index}, effect {effect_index}: "
+                            "offset must be non-negative."
+                        )
 
     if dialogue_count == 0:
         errors.append("The film has no character dialogue.")
@@ -829,7 +828,6 @@ def validate_film_project(project):
                     f"expected {expected}, got {actual}."
                 )
 
-    # Audio is optional for older project JSON files.
     audio = project.get("audio")
 
     if audio is not None:
@@ -884,7 +882,26 @@ def validate_film_project(project):
                             f"Audio {section} volume must be between 0 and 1."
                         )
 
-    # Cost policy is optional for older project JSON files.
+            for section in ("music", "ambience"):
+                settings = audio.get(section)
+
+                if isinstance(settings, dict):
+                    if not isinstance(
+                        settings.get("asset_path", ""),
+                        str,
+                    ):
+                        errors.append(
+                            f"Audio {section} asset_path must be a string."
+                        )
+
+                    if not isinstance(
+                        settings.get("license_verified", False),
+                        bool,
+                    ):
+                        errors.append(
+                            f"Audio {section} license_verified must be boolean."
+                        )
+
     cost_policy = project.get("cost_policy")
 
     if cost_policy is not None:
@@ -942,7 +959,7 @@ def validate_film_project(project):
 
 
 def to_legacy_script(project):
-    """Adapt a valid canonical project for the existing generate.py code."""
+    """Adapt a valid canonical project to the existing generate.py format."""
     report = validate_film_project(project)
 
     if not report["valid"]:
@@ -971,4 +988,3 @@ def to_legacy_script(project):
         result["cost_policy"] = deepcopy(project["cost_policy"])
 
     return result
-
