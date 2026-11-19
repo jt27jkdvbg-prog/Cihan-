@@ -59,6 +59,7 @@ jobs:
             quality_gate.py \
             pipeline_config.py \
             wan_performance.py \
+            wan_audio_postprocess.py \
             production_orchestrator.py \
             tests/test_production_orchestrator.py
 
