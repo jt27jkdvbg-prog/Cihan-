@@ -743,7 +743,6 @@ def synthesize_scene(
 
     return scene_audio
 
-    return scene_audio
 
 
 def create_silence(path, duration):
