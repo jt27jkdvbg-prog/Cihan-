@@ -60,7 +60,7 @@ def _validate_image(path: Path) -> str:
         header = file.read(16)
 
     if header.startswith(b"\xff\xd8\xff"):
-        return "jpeg"
+        return "jpg"
 
     if header.startswith(b"\x89PNG\r\n\x1a\n"):
         return "png"
