@@ -58,7 +58,9 @@ jobs:
             speech_director.py \
             quality_gate.py \
             pipeline_config.py \
-            wan_performance.py
+            wan_performance.py \
+            production_orchestrator.py \
+            tests/test_production_orchestrator.py
 
       - name: Ana testleri çalıştır
         run: python -m unittest discover -s tests -v
@@ -68,3 +70,4 @@ jobs:
 
       - name: Ses yönetmeni testlerini çalıştır
         run: python -m unittest test_speech_director -v
+
