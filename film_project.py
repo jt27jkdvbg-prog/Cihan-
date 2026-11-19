@@ -44,7 +44,7 @@ PRODUCTION_DEFAULTS = {
 # be used unless the production cost policy explicitly permits it.
 DEFAULT_AUDIO_SETTINGS = {
     "enabled": True,
-    "tts_provider_order": ["gemini", "edge", "gtts", "xai"],
+    "tts_provider_order": ["gemini", "edge", "gtts"],
     "narration_enabled": True,
     "subtitles": {
         "enabled": True,
