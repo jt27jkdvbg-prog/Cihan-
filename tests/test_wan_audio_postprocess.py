@@ -1,4 +1,3 @@
-
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +10,10 @@ from wan_audio_postprocess import (
     timestamp,
     write_srt,
 )
+
+from film_project import build_film_project
+from project_adapter import legacy_to_pipeline_project
+from wan_project_input import normalize_wan_project
 
 
 class WanAudioPostprocessTests(unittest.TestCase):
@@ -130,6 +133,83 @@ class WanAudioPostprocessTests(unittest.TestCase):
             self.assertIn("00:00:00,000", content)
             self.assertIn("00:00:01,500", content)
             self.assertIn("Merhaba dünya.", content)
+
+    def test_audio_settings_survive_project_normalization(self):
+        legacy_project = build_film_project(
+            script={
+                "characters": [
+                    {
+                        "id": "ali",
+                        "name": "Ali",
+                        "description": "Ana karakter",
+                        "personality": "Cesur",
+                        "voice_gender": "male",
+                    },
+                    {
+                        "id": "ayse",
+                        "name": "Ayşe",
+                        "description": "İkinci karakter",
+                        "personality": "Kararlı",
+                        "voice_gender": "female",
+                    },
+                ],
+                "scenes": [
+                    {
+                        "scene_number": 1,
+                        "description": "Gece vakti şehir",
+                        "narration": "Şehir sessizliğe gömülmüştü.",
+                        "dialogue_turns": [
+                            {
+                                "speaker": "ali",
+                                "text": "Burada ne oldu?",
+                            }
+                        ],
+                    }
+                ],
+            },
+            topic="Son Işık",
+            target_seconds=60,
+        )
+
+        if hasattr(legacy_project, "to_dict"):
+            legacy_project = legacy_project.to_dict()
+
+        modern_project = legacy_to_pipeline_project(
+            legacy_project
+        )
+
+        if hasattr(modern_project, "to_dict"):
+            modern_project = modern_project.to_dict()
+
+        expected_audio = {
+            "enabled": True,
+            "narration": True,
+            "subtitles": True,
+            "music": False,
+            "ambience": False,
+            "sound_effects": False,
+        }
+
+        expected_cost_policy = {
+            "mode": "free_only",
+            "allow_paid_services": False,
+            "budget": 0,
+        }
+
+        modern_project["audio"] = expected_audio
+        modern_project["cost_policy"] = expected_cost_policy
+
+        normalized = normalize_wan_project(modern_project)
+
+        self.assertEqual(
+            normalized["audio"],
+            expected_audio,
+        )
+
+        self.assertEqual(
+            normalized["cost_policy"],
+            expected_cost_policy,
+        )
 
 
 if __name__ == "__main__":
