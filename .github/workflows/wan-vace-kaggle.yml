@@ -851,6 +851,51 @@ jobs:
           print("Sahne sayısı:", len(scenes))
           print("Worker ve metadata hazır.")
           PY
+      
+      - name: Karakter referanslarını üret ve Kaggle'a private yükle
+        if: ${{ inputs.run_mode == 'production' && inputs.project_json != '' }}
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          VIDEO_PROJECT_JSON: ${{ inputs.project_json }}
+          IMAGE_ENGINE: cloudflare
+        run: |
+          set -euo pipefail
+
+          echo "Karakter referans üretim bağımlılıkları kuruluyor..."
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+          mkdir -p .work
+
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          raw = os.environ.get("VIDEO_PROJECT_JSON", "").strip()
+
+          if not raw:
+              raise SystemExit("Film proje JSON verisi boş.")
+
+          project_path = Path(".work/project.json")
+          project_path.write_text(
+              raw + "\n",
+              encoding="utf-8"
+          )
+
+          print("Film proje JSON dosyası hazır.")
+          PY
+
+          python wan_kaggle_workflow_prepare.py \
+            --project-json .work/project.json \
+            --workspace ".work/production-${GITHUB_RUN_ID}" \
+            --payload-output ".work/payload-${GITHUB_RUN_ID}" \
+            --dataset-output ".work/dataset-${GITHUB_RUN_ID}" \
+            --kaggle-owner "$KAGGLE_USERNAME" \
+            --dataset-slug "cihan-character-refs-${GITHUB_RUN_ID}" \
+            --kernel-metadata kaggle-worker/kernel-metadata.json
 
       - name: Worker ve Kaggle metadata ön kontrolü
         run: |
