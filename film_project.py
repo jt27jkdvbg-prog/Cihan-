@@ -8,11 +8,18 @@ Visual worker target:
 - Landscape frame: 832x480 (26:15)
 - Frame rate: 16 fps
 
-Audio schema:
-- xAI/Grok -> Gemini -> Edge TTS -> gTTS fallback order
+Audio:
+- Free-first TTS provider order
+- Optional paid xAI/Grok TTS
+- Paid music and sound-effect generation disabled by default
 - Character-specific voice profiles
 - Music, ambience, sound effects and subtitle preferences
-- Audio mixing and delivery settings
+
+Cost policy:
+- Free-only mode by default
+- Paid services require explicit approval
+- Unknown prices block execution
+- Project budget defaults to zero
 
 No API keys or external dependencies belong in this module.
 """
@@ -33,9 +40,11 @@ PRODUCTION_DEFAULTS = {
     "fps": 16,
 }
 
+# Free-first order. xAI is an optional paid fallback and must not
+# be used unless the production cost policy explicitly permits it.
 DEFAULT_AUDIO_SETTINGS = {
     "enabled": True,
-    "tts_provider_order": ["xai", "gemini", "edge", "gtts"],
+    "tts_provider_order": ["gemini", "edge", "gtts", "xai"],
     "narration_enabled": True,
     "subtitles": {
         "enabled": True,
@@ -43,22 +52,23 @@ DEFAULT_AUDIO_SETTINGS = {
         "burn_in": False,
     },
     "music": {
-        "enabled": True,
-        "provider": "fal",
-        "model": "sonilo/v1.1/text-to-music",
+        "enabled": False,
+        "provider": "licensed_library",
+        "model": "",
         "prompt": "",
         "volume": 0.18,
         "ducking": True,
     },
     "ambience": {
-        "enabled": True,
+        "enabled": False,
+        "provider": "licensed_library",
         "prompt": "",
         "volume": 0.22,
     },
     "sound_effects": {
-        "enabled": True,
-        "provider": "fal",
-        "model": "sonilo/v1.1/text-to-sound-effects",
+        "enabled": False,
+        "provider": "licensed_library",
+        "model": "",
         "volume": 0.45,
     },
     "mix": {
@@ -71,8 +81,59 @@ DEFAULT_AUDIO_SETTINGS = {
     },
 }
 
+DEFAULT_COST_POLICY = {
+    "mode": "free_only",
+    "paid_services_allowed": False,
+    "require_approval": True,
+    "show_cost_before_run": True,
+    "block_unknown_prices": True,
+    "currency": "USD",
+    "max_project_budget": 0.0,
+    "record_estimated_costs": True,
+    "record_actual_costs": True,
+}
 
-TTS_PROVIDERS = {"xai", "gemini", "edge", "gtts", "groq"}
+# This is a classification, not a live price quote.
+# Exact prices and quotas must be checked by the production cost checker.
+SERVICE_COST_CATALOG = {
+    "gemini_tts": {
+        "category": "free_quota",
+        "description": "Free quota may be available; usage limits apply.",
+        "requires_price_check": True,
+    },
+    "edge_tts": {
+        "category": "free",
+        "description": "Free-to-use TTS service; availability may change.",
+        "requires_price_check": False,
+    },
+    "gtts": {
+        "category": "free",
+        "description": "Free basic text-to-speech library; availability may change.",
+        "requires_price_check": False,
+    },
+    "xai_tts": {
+        "category": "paid",
+        "description": "Paid usage-based TTS service.",
+        "requires_price_check": True,
+    },
+    "fal_music": {
+        "category": "paid",
+        "description": "Paid usage-based music generation.",
+        "requires_price_check": True,
+    },
+    "fal_sound_effects": {
+        "category": "paid",
+        "description": "Paid usage-based sound-effect generation.",
+        "requires_price_check": True,
+    },
+    "licensed_library": {
+        "category": "free_or_licensed",
+        "description": "Use only assets whose license permits the intended use.",
+        "requires_price_check": True,
+    },
+}
+
+TTS_PROVIDERS = {"xai", "gemini", "edge", "gtts"}
 
 
 def _text(value, default=""):
@@ -121,8 +182,64 @@ def _normalize_provider_order(value):
     return result
 
 
+def _normalize_cost_policy(raw_policy=None):
+    """Create a safe cost policy. Paid usage is disabled by default."""
+    raw = raw_policy if isinstance(raw_policy, dict) else {}
+    result = deepcopy(DEFAULT_COST_POLICY)
+
+    mode = _text(raw.get("mode"), result["mode"]).lower()
+    if mode not in {"free_only", "approval_required", "paid_allowed"}:
+        mode = "free_only"
+
+    result["mode"] = mode
+
+    # A project cannot silently enable paid services.
+    requested_paid = bool(
+        raw.get("paid_services_allowed", result["paid_services_allowed"])
+    )
+
+    if mode == "free_only":
+        result["paid_services_allowed"] = False
+    else:
+        result["paid_services_allowed"] = requested_paid
+
+    # Approval and price checks remain mandatory for paid services.
+    result["require_approval"] = True
+    result["show_cost_before_run"] = True
+    result["block_unknown_prices"] = True
+
+    currency = _text(raw.get("currency"), "USD").upper()
+    if len(currency) == 3 and currency.isalpha():
+        result["currency"] = currency
+
+    result["max_project_budget"] = _clamp_float(
+        raw.get("max_project_budget"),
+        result["max_project_budget"],
+        0.0,
+        1000000.0,
+    )
+
+    result["record_estimated_costs"] = bool(
+        raw.get(
+            "record_estimated_costs",
+            result["record_estimated_costs"],
+        )
+    )
+    result["record_actual_costs"] = bool(
+        raw.get(
+            "record_actual_costs",
+            result["record_actual_costs"],
+        )
+    )
+
+    if mode == "free_only":
+        result["max_project_budget"] = 0.0
+
+    return result
+
+
 def _normalize_audio_settings(raw_audio=None):
-    """Create a complete, safe audio-settings object."""
+    """Create a complete, free-first audio-settings object."""
     raw = raw_audio if isinstance(raw_audio, dict) else {}
     result = deepcopy(DEFAULT_AUDIO_SETTINGS)
 
@@ -192,6 +309,10 @@ def _normalize_audio_settings(raw_audio=None):
                 result["ambience"]["enabled"],
             )
         )
+        result["ambience"]["provider"] = _text(
+            raw_ambience.get("provider"),
+            result["ambience"]["provider"],
+        ).lower()
         result["ambience"]["prompt"] = _text(
             raw_ambience.get("prompt"),
             result["ambience"]["prompt"],
@@ -479,6 +600,8 @@ def build_film_project(
     if not isinstance(raw_audio, dict):
         raw_audio = source.get("audio_settings")
 
+    raw_cost_policy = source.get("cost_policy")
+
     project = {
         "schema_version": SCHEMA_VERSION,
         "film": {
@@ -505,6 +628,7 @@ def build_film_project(
         },
         "production": deepcopy(PRODUCTION_DEFAULTS),
         "audio": _normalize_audio_settings(raw_audio),
+        "cost_policy": _normalize_cost_policy(raw_cost_policy),
         "characters": normalized_characters,
         "scenes": normalized_scenes,
     }
@@ -706,7 +830,6 @@ def validate_film_project(project):
                 )
 
     # Audio is optional for older project JSON files.
-    # New projects created by build_film_project always include it.
     audio = project.get("audio")
 
     if audio is not None:
@@ -761,6 +884,53 @@ def validate_film_project(project):
                             f"Audio {section} volume must be between 0 and 1."
                         )
 
+    # Cost policy is optional for older project JSON files.
+    cost_policy = project.get("cost_policy")
+
+    if cost_policy is not None:
+        if not isinstance(cost_policy, dict):
+            errors.append("Cost policy must be an object.")
+        else:
+            mode = cost_policy.get("mode")
+
+            if mode not in {
+                "free_only",
+                "approval_required",
+                "paid_allowed",
+            }:
+                errors.append("Invalid cost policy mode.")
+
+            budget = cost_policy.get("max_project_budget")
+
+            if (
+                isinstance(budget, bool)
+                or not isinstance(budget, (int, float))
+                or budget < 0
+            ):
+                errors.append(
+                    "Cost policy max_project_budget must be non-negative."
+                )
+
+            if mode == "free_only":
+                if cost_policy.get("paid_services_allowed") is not False:
+                    errors.append(
+                        "Free-only mode cannot allow paid services."
+                    )
+                if budget != 0:
+                    errors.append(
+                        "Free-only mode must have a zero project budget."
+                    )
+
+            if cost_policy.get("require_approval") is not True:
+                errors.append(
+                    "Paid services must require explicit approval."
+                )
+
+            if cost_policy.get("block_unknown_prices") is not True:
+                errors.append(
+                    "Services with unknown prices must be blocked."
+                )
+
     return {
         "valid": not errors,
         "errors": errors,
@@ -794,9 +964,11 @@ def to_legacy_script(project):
         "fallback_mode": False,
     }
 
-    # Preserve audio settings for downstream audio processing.
     if isinstance(project.get("audio"), dict):
         result["audio"] = deepcopy(project["audio"])
+
+    if isinstance(project.get("cost_policy"), dict):
+        result["cost_policy"] = deepcopy(project["cost_policy"])
 
     return result
 
