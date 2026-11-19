@@ -9,8 +9,22 @@ import shutil
 from pathlib import Path
 from typing import Any, Mapping
 
-from pipeline_config import FilmProject
+from pipeline_config import FilmProject, ProjectConfigError
 from production_orchestrator import ProductionJob
+from project_adapter import legacy_to_pipeline_project
+
+
+def _load_project(project_data: Mapping[str, Any]) -> FilmProject:
+    """Accept both modern pipeline projects and legacy film projects."""
+    if not isinstance(project_data, Mapping):
+        raise ProjectConfigError("Project JSON must contain an object.")
+
+    candidate = dict(project_data)
+
+    if "film" in candidate and "production" in candidate:
+        return legacy_to_pipeline_project(candidate)
+
+    return FilmProject.from_dict(candidate)
 
 
 def _copy_nonempty(source: str | Path, destination: Path) -> None:
@@ -34,6 +48,32 @@ def _copy_nonempty(source: str | Path, destination: Path) -> None:
             f"Output copy failed: {destination}"
         )
 
+    if source_path.stat().st_size != destination.stat().st_size:
+        raise RuntimeError(
+            f"Output copy size mismatch: {destination}"
+        )
+
+
+def _write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+
+    try:
+        with temporary.open("w", encoding="utf-8") as file:
+            json.dump(
+                value,
+                file,
+                ensure_ascii=False,
+                indent=2,
+            )
+            file.flush()
+
+        temporary.replace(path)
+
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
 
 def register_wan_output(
     project_data: Mapping[str, Any],
@@ -42,34 +82,33 @@ def register_wan_output(
     report_path: str | Path,
 ) -> ProductionJob:
     """
-    Create a job, register validated project inputs, and record actual
-    Wan video/report files as video_generation artifacts.
+    Create a production job and register actual Wan video outputs.
 
-    Audio generation and post-production deliberately remain pending.
+    Character assets are deliberately NOT marked as completed here.
+    The Wan text-to-video workflow does not generate persistent character
+    reference images, so that stage must remain pending until a real
+    character-asset generator is integrated.
     """
-    project = FilmProject.from_dict(dict(project_data))
+    project = _load_project(project_data)
     job = ProductionJob.create(workspace, project.to_dict())
 
     artifacts_dir = job.workspace / "artifacts"
     input_dir = artifacts_dir / "inputs"
     wan_dir = artifacts_dir / "wan"
 
-    # Stage 1: validated project input.
+    # Stage 1: validate and record the canonical project.
     validation_path = input_dir / "project_validation.json"
-    validation_path.parent.mkdir(parents=True, exist_ok=True)
-    validation_path.write_text(
-        json.dumps(
-            {
-                "valid": True,
-                "project_id": project.project_id,
-                "project_title": project.title,
-                "scene_count": len(project.scenes),
-                "character_count": len(project.characters),
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
+
+    _write_json(
+        validation_path,
+        {
+            "valid": True,
+            "project_id": project.project_id,
+            "project_title": project.title,
+            "scene_count": len(project.scenes),
+            "character_count": len(project.characters),
+            "schema": "pipeline_config.FilmProject",
+        },
     )
 
     job.start_stage("project_validation")
@@ -78,16 +117,10 @@ def register_wan_output(
         ["artifacts/inputs/project_validation.json"],
     )
 
-    # Stage 2: the canonical project is the script/scene source of truth.
+    # Stage 2: preserve the canonical script and scene source.
     script_path = input_dir / "script_input.json"
-    script_path.write_text(
-        json.dumps(
-            project.to_dict(),
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+
+    _write_json(script_path, project.to_dict())
 
     job.start_stage("script")
     job.complete_stage(
@@ -95,35 +128,33 @@ def register_wan_output(
         ["artifacts/inputs/script_input.json"],
     )
 
-    # Stage 3: record the supplied character definitions.
-    # This is a validated character brief, not generated image assets.
-    characters_path = input_dir / "character_definitions.json"
-    characters_path.write_text(
-        json.dumps(
-            [
-                character.to_dict()
-                for character in project.characters
-            ],
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
+    # Character definitions are retained as input data only.
+    # They are NOT proof that visual reference assets were generated.
+    character_definitions_path = (
+        input_dir / "character_definitions.json"
     )
 
-    job.start_stage("character_assets")
-    job.complete_stage(
-        "character_assets",
-        ["artifacts/inputs/character_definitions.json"],
+    _write_json(
+        character_definitions_path,
+        [
+            {
+                "id": character.id,
+                "name": character.name,
+                "visual_description": character.visual_description,
+                "appearance": character.appearance,
+                "personality": character.personality,
+            }
+            for character in project.characters
+        ],
     )
 
-    # Stage 4: copy and register the actual Wan outputs.
+    # Stage 3: register actual Wan outputs.
     final_video = wan_dir / "final-film.mp4"
     performance_report = wan_dir / "performance_report.json"
 
     _copy_nonempty(video_path, final_video)
     _copy_nonempty(report_path, performance_report)
 
-    # A report must be valid JSON before it is accepted.
     try:
         report_data = json.loads(
             performance_report.read_text(encoding="utf-8")
@@ -147,7 +178,8 @@ def register_wan_output(
         ],
     )
 
-    # Do not mark audio or post-production complete.
+    # Audio, character assets, post-production, QC and publishing
+    # remain pending until their real generators are integrated.
     return ProductionJob.open(job.workspace)
 
 
@@ -177,19 +209,21 @@ def main() -> None:
     print("Wan output successfully registered.")
     print("Job ID:", manifest["job_id"])
     print("Job status:", manifest["status"])
-    print(
-        "Video stage:",
-        manifest["stages"]["video_generation"]["status"],
-    )
-    print(
-        "Audio stage:",
-        manifest["stages"]["audio_generation"]["status"],
-    )
-    print(
-        "Post-production stage:",
-        manifest["stages"]["post_production"]["status"],
-    )
+
+    for stage in (
+        "character_assets",
+        "video_generation",
+        "audio_generation",
+        "post_production",
+        "quality_control",
+        "publishing",
+    ):
+        print(
+            f"{stage}:",
+            manifest["stages"][stage]["status"],
+        )
 
 
 if __name__ == "__main__":
     main()
+
