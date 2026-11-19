@@ -192,7 +192,10 @@ class WanOrchestratorBridgeTests(unittest.TestCase):
         stage = job.manifest["stages"]["character_assets"]
 
         self.assertEqual(stage["status"], "succeeded")
-        self.assertEqual(len(stage["artifacts"]), 2)
+
+        # One anchor image, one registered manifest,
+        # and one character definitions artifact.
+        self.assertEqual(len(stage["artifacts"]), 3)
 
         copied_manifest = (
             self.workspace
@@ -407,4 +410,6 @@ class WanOrchestratorBridgeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
 
