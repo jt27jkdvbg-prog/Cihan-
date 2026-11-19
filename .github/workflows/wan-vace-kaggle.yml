@@ -1008,21 +1008,34 @@ jobs:
           mkdir -p .work
 
           python - <<'PY'
+                    import json
           import os
           from pathlib import Path
+
+          from wan_project_input import normalize_wan_project
 
           raw = os.environ.get("VIDEO_PROJECT_JSON", "").strip()
 
           if not raw:
               raise SystemExit("Film proje JSON verisi boş.")
 
+          try:
+              source_project = json.loads(raw)
+          except json.JSONDecodeError as exc:
+              raise SystemExit(f"Proje JSON geçersiz: {exc}")
+
+          normalized_project = normalize_wan_project(source_project)
+
           project_path = Path(".work/project.json")
+          project_path.parent.mkdir(parents=True, exist_ok=True)
           project_path.write_text(
-              raw + "\n",
+              json.dumps(normalized_project, ensure_ascii=False, indent=2) + "\n",
               encoding="utf-8"
           )
 
-          print("Film proje JSON dosyası hazır.")
+          print("Normalize edilmiş film projesi hazır.")
+          print("Ses ayarları:", "audio" in normalized_project)
+          print("Maliyet politikası:", "cost_policy" in normalized_project)
           PY
 
           python wan_kaggle_workflow_prepare.py \
