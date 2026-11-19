@@ -398,7 +398,7 @@ jobs:
                   worker_dir = Path(__file__).resolve().parent
                   sys.path.insert(0, str(worker_dir))
 
-                                    # load_reference_bundle worker.py içine gömülüdür.
+                  # load_reference_bundle worker.py içine gömülüdür.
 
                   input_root = Path("/kaggle/input")
                   if not input_root.is_dir():
@@ -966,7 +966,7 @@ jobs:
               1
           )
 
-                    loader_source = Path("wan_kaggle_reference_loader.py")
+          loader_source = Path("wan_kaggle_reference_loader.py")
 
           if not loader_source.is_file():
               raise FileNotFoundError(
