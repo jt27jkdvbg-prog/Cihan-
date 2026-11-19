@@ -1008,7 +1008,7 @@ jobs:
           mkdir -p .work
 
           python - <<'PY'
-                    import json
+          import json
           import os
           from pathlib import Path
 
