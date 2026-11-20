@@ -774,23 +774,10 @@ def process(project_path, video_path, output_path, work_dir):
     work_dir.mkdir(parents=True, exist_ok=True)
 
     if audio_settings.get("enabled") is False:
-        shutil.copy2(video_path, output_path)
-
-        REPORT["status"] = "success_audio_disabled"
-        REPORT["output_file"] = str(output_path)
         REPORT["notes"].append(
-            "Proje ses sistemi kapalı. Sessiz video değiştirilmeden aktarıldı."
+            "Ses ayarı kapalı görünüyordu; karakter diyaloglarının "
+            "üretilmesi ve videoya eklenmesi için ses işleme sürdürüldü."
         )
-
-        report_path = output_path.with_name("audio_runtime_report.json")
-        write_json(report_path, REPORT)
-
-        print("AUDIO_POSTPROCESS_SKIPPED")
-        print("Audio disabled; original video copied.")
-        print("Final:", output_path)
-        print("Report:", report_path)
-        return
-
     if not scenes:
         raise RuntimeError("Film sahneleri bulunamadı.")
 
