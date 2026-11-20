@@ -103,37 +103,47 @@ def extract_frame(video, timestamp, destination):
     return frame
 
 
+
 def detect_faces(detector, frame):
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-    detections = detector.get_detections_for_batch(
+    face_detector = getattr(detector, "face_detector", None)
+
+    if face_detector is None:
+        raise RuntimeError(
+            "Yüz algılama motoru bulunamadı."
+        )
+
+    detections = face_detector.detect_from_batch(
         np.asarray([rgb])
     )
 
-    if not detections:
+    if not detections or detections[0] is None:
         return []
 
-    boxes = detections[0]
+    boxes = np.asarray(detections[0])
 
-    if boxes is None:
+    if boxes.size == 0:
         return []
+
+    if boxes.ndim == 1:
+        boxes = boxes.reshape(1, -1)
 
     result = []
+    height, width = frame.shape[:2]
 
     for box in boxes:
-        if box is None:
-            continue
-
         values = np.asarray(box).reshape(-1)
 
         if len(values) < 4:
             continue
 
+        if not np.all(np.isfinite(values[:4])):
+            continue
+
         x1, y1, x2, y2 = [
             int(round(float(v))) for v in values[:4]
         ]
-
-        height, width = frame.shape[:2]
 
         x1 = max(0, min(x1, width - 1))
         x2 = max(0, min(x2, width - 1))
@@ -151,6 +161,7 @@ def detect_faces(detector, frame):
         })
 
     return result
+
 
 
 def annotate_frame(frame, boxes, label):
