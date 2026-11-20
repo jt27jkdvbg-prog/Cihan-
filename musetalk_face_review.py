@@ -1,20 +1,26 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
-MuseTalk Face Review v1.0
+MuseTalk Face Review v1.1
 
 Diyalog kliplerindeki yüzleri inceler.
 Otomatik konuşmacı eşleştirmesi veya yüz onayı yapmaz.
+
+Çıktılar:
+- face_review.json
+- previews/
+- face_review_output.zip
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 import subprocess
+import zipfile
 
 from pathlib import Path
 
@@ -28,6 +34,9 @@ except ImportError as exc:
         "MuseTalk face_detection paketi bulunamadı. "
         "Bu dosyayı MuseTalk kurulu ortamda çalıştır."
     ) from exc
+
+
+VERSION = "1.1.0"
 
 
 def run(command):
@@ -51,30 +60,42 @@ def run(command):
 
 
 def read_json(path):
-    with path.open("r", encoding="utf-8") as f:
-        data = json.load(f)
+    with path.open("r", encoding="utf-8") as file:
+        data = json.load(file)
 
     if not isinstance(data, dict):
-        raise RuntimeError("JSON kök verisi nesne olmalı.")
+        raise RuntimeError(
+            "JSON kök verisi nesne olmalı."
+        )
 
     return data
 
 
 def write_json(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-    temp = path.with_suffix(".tmp")
+    temporary = path.with_suffix(".tmp")
 
-    temp.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+    temporary.write_text(
+        json.dumps(
+            data,
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n",
         encoding="utf-8",
     )
 
-    temp.replace(path)
+    temporary.replace(path)
 
 
 def extract_frame(video, timestamp, destination):
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     run([
         "ffmpeg",
@@ -88,7 +109,10 @@ def extract_frame(video, timestamp, destination):
         str(destination),
     ])
 
-    if not destination.is_file() or destination.stat().st_size == 0:
+    if (
+        not destination.is_file()
+        or destination.stat().st_size == 0
+    ):
         raise RuntimeError(
             f"Görüntü çıkarılamadı: {destination}"
         )
@@ -103,25 +127,53 @@ def extract_frame(video, timestamp, destination):
     return frame
 
 
-
 def detect_faces(detector, frame):
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    """
+    Bir karedeki tüm yüz kutularını döndürür.
 
-    face_detector = getattr(detector, "face_detector", None)
+    get_detections_for_batch yerine doğrudan
+    face_detector kullanılır; böylece yalnızca
+    ilk yüzün döndürülmesi sorunu önlenir.
+    """
+
+    rgb = cv2.cvtColor(
+        frame,
+        cv2.COLOR_BGR2RGB,
+    )
+
+    face_detector = getattr(
+        detector,
+        "face_detector",
+        None,
+    )
 
     if face_detector is None:
         raise RuntimeError(
             "Yüz algılama motoru bulunamadı."
         )
 
+    if not hasattr(
+        face_detector,
+        "detect_from_batch",
+    ):
+        raise RuntimeError(
+            "Yüz algılama motorunda "
+            "detect_from_batch metodu bulunamadı."
+        )
+
     detections = face_detector.detect_from_batch(
         np.asarray([rgb])
     )
 
-    if not detections or detections[0] is None:
+    if detections is None or len(detections) == 0:
         return []
 
-    boxes = np.asarray(detections[0])
+    frame_detections = detections[0]
+
+    if frame_detections is None:
+        return []
+
+    boxes = np.asarray(frame_detections)
 
     if boxes.size == 0:
         return []
@@ -130,6 +182,7 @@ def detect_faces(detector, frame):
         boxes = boxes.reshape(1, -1)
 
     result = []
+
     height, width = frame.shape[:2]
 
     for box in boxes:
@@ -138,11 +191,14 @@ def detect_faces(detector, frame):
         if len(values) < 4:
             continue
 
-        if not np.all(np.isfinite(values[:4])):
+        coordinates = values[:4]
+
+        if not np.all(np.isfinite(coordinates)):
             continue
 
         x1, y1, x2, y2 = [
-            int(round(float(v))) for v in values[:4]
+            int(round(float(value)))
+            for value in coordinates
         ]
 
         x1 = max(0, min(x1, width - 1))
@@ -163,7 +219,6 @@ def detect_faces(detector, frame):
     return result
 
 
-
 def annotate_frame(frame, boxes, label):
     image = frame.copy()
 
@@ -179,7 +234,10 @@ def annotate_frame(frame, boxes, label):
         cv2.putText(
             image,
             f"Face {index + 1}",
-            (box["x1"], max(25, box["y1"] - 10)),
+            (
+                box["x1"],
+                max(25, box["y1"] - 10),
+            ),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.8,
             (0, 220, 0),
@@ -201,6 +259,55 @@ def annotate_frame(frame, boxes, label):
     return image
 
 
+def create_review_zip(output_dir):
+    """
+    İnceleme raporunu ve önizleme görsellerini
+    tek bir indirilebilir ZIP dosyasında toplar.
+    """
+
+    zip_path = output_dir.parent / (
+        output_dir.name + ".zip"
+    )
+
+    if zip_path.exists():
+        raise FileExistsError(
+            f"ZIP dosyası zaten mevcut: {zip_path}"
+        )
+
+    with zipfile.ZipFile(
+        zip_path,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=6,
+    ) as archive:
+
+        for file_path in sorted(
+            output_dir.rglob("*")
+        ):
+            if not file_path.is_file():
+                continue
+
+            archive_name = (
+                Path(output_dir.name)
+                / file_path.relative_to(output_dir)
+            )
+
+            archive.write(
+                file_path,
+                archive_name.as_posix(),
+            )
+
+    if (
+        not zip_path.is_file()
+        or zip_path.stat().st_size == 0
+    ):
+        raise RuntimeError(
+            "İnceleme ZIP paketi oluşturulamadı."
+        )
+
+    return zip_path
+
+
 def review(
     package: Path,
     output_dir: Path,
@@ -210,7 +317,9 @@ def review(
     output_dir = output_dir.resolve()
 
     video = package / "video.mp4"
-    timeline_path = package / "lip_sync_timeline.json"
+    timeline_path = (
+        package / "lip_sync_timeline.json"
+    )
 
     if not video.is_file():
         raise FileNotFoundError(video)
@@ -227,17 +336,31 @@ def review(
 
     if timeline.get("status") != "package_ready":
         raise RuntimeError(
-            "Zaman çizelgesi package_ready durumunda değil."
+            "Zaman çizelgesi package_ready "
+            "durumunda değil."
         )
 
     dialogue = timeline.get("dialogue")
 
-    if not isinstance(dialogue, list) or not dialogue:
-        raise RuntimeError("Diyalog listesi boş.")
+    if (
+        not isinstance(dialogue, list)
+        or not dialogue
+    ):
+        raise RuntimeError(
+            "Diyalog listesi boş."
+        )
 
-    output_dir.mkdir(parents=True)
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=False,
+    )
+
     preview_dir = output_dir / "previews"
-    preview_dir.mkdir()
+
+    preview_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     detector = FaceAlignment(
         LandmarksType._2D,
@@ -248,14 +371,40 @@ def review(
     results = []
 
     for index, entry in enumerate(dialogue):
+
         if not isinstance(entry, dict):
-            continue
+            raise RuntimeError(
+                f"Diyalog {index} geçersiz."
+            )
 
-        start = float(entry["film_start_seconds"])
-        end = float(entry["film_end_seconds"])
+        try:
+            start = float(
+                entry["film_start_seconds"]
+            )
 
-        if end <= start:
-            continue
+            end = float(
+                entry["film_end_seconds"]
+            )
+
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            OverflowError,
+        ):
+            raise RuntimeError(
+                f"Diyalog {index} zaman bilgileri geçersiz."
+            )
+
+        if (
+            not math.isfinite(start)
+            or not math.isfinite(end)
+            or start < 0
+            or end <= start
+        ):
+            raise RuntimeError(
+                f"Diyalog {index} zaman aralığı geçersiz."
+            )
 
         duration = end - start
 
@@ -267,7 +416,10 @@ def review(
 
         frame_results = []
 
-        for sample_index, timestamp in enumerate(sample_times):
+        for sample_index, timestamp in enumerate(
+            sample_times
+        ):
+
             name = (
                 f"dialogue_{index:04d}_"
                 f"sample_{sample_index + 1}.jpg"
@@ -281,22 +433,39 @@ def review(
                 image_path,
             )
 
-            boxes = detect_faces(detector, frame)
+            boxes = detect_faces(
+                detector,
+                frame,
+            )
 
             annotated = annotate_frame(
                 frame,
                 boxes,
-                f"Dialogue {index} | {timestamp:.2f}s",
+                (
+                    f"Dialogue {index} | "
+                    f"{timestamp:.2f}s"
+                ),
             )
 
-            cv2.imwrite(str(image_path), annotated)
+            if not cv2.imwrite(
+                str(image_path),
+                annotated,
+            ):
+                raise RuntimeError(
+                    f"Önizleme kaydedilemedi: {image_path}"
+                )
 
             frame_results.append({
                 "sample_index": sample_index + 1,
-                "timestamp_seconds": round(timestamp, 4),
+                "timestamp_seconds": round(
+                    timestamp,
+                    4,
+                ),
                 "face_count": len(boxes),
                 "face_boxes_xyxy": boxes,
-                "preview": f"previews/{name}",
+                "preview": (
+                    f"previews/{name}"
+                ),
             })
 
         counts = [
@@ -305,7 +474,8 @@ def review(
         ]
 
         stable_single_face = all(
-            count == 1 for count in counts
+            count == 1
+            for count in counts
         )
 
         results.append({
@@ -325,6 +495,7 @@ def review(
                 if stable_single_face
                 else "manual_review_required"
             ),
+            "human_approved": False,
             "automatic_approval": False,
         })
 
@@ -335,30 +506,46 @@ def review(
         )
 
     report = {
-        "version": "1.0.0",
+        "version": VERSION,
         "status": "face_review_ready",
         "automatic_speaker_matching": False,
         "automatic_face_approval": False,
         "total_dialogue": len(results),
         "dialogue": results,
         "important_note": (
-            "Bu rapor yalnızca yüz tespiti ve inceleme "
-            "görselleri üretir. Yüzün konuşmacıya ait "
-            "olduğunu kanıtlamaz. Her diyalog insan "
-            "tarafından doğrulanmadan işlenmemelidir."
+            "Bu rapor yalnızca yüz tespiti ve "
+            "inceleme görselleri üretir. Yüzün "
+            "konuşmacıya ait olduğunu kanıtlamaz. "
+            "Her diyalog insan tarafından "
+            "doğrulanmadan işlenmemelidir."
         ),
     }
 
-    report_path = output_dir / "face_review.json"
-    write_json(report_path, report)
+    report_path = (
+        output_dir / "face_review.json"
+    )
+
+    write_json(
+        report_path,
+        report,
+    )
+
+    zip_path = create_review_zip(
+        output_dir
+    )
 
     print(
         json.dumps(
             {
                 "status": "success",
+                "version": VERSION,
                 "report": str(report_path),
-                "preview_directory": str(preview_dir),
+                "preview_directory": str(
+                    preview_dir
+                ),
+                "zip_file": str(zip_path),
                 "dialogue_count": len(results),
+                "automatic_approval": False,
             },
             ensure_ascii=False,
             indent=2,
@@ -368,10 +555,22 @@ def review(
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description=(
+            "MuseTalk yüz inceleme ve "
+            "önizleme paketi oluşturucu."
+        )
+    )
 
-    parser.add_argument("--package", required=True)
-    parser.add_argument("--output", required=True)
+    parser.add_argument(
+        "--package",
+        required=True,
+    )
+
+    parser.add_argument(
+        "--output",
+        required=True,
+    )
 
     parser.add_argument(
         "--device",
@@ -382,16 +581,21 @@ def main():
     args = parser.parse_args()
 
     if shutil.which("ffmpeg") is None:
-        raise SystemExit("FFmpeg bulunamadı.")
+        raise SystemExit(
+            "FFmpeg bulunamadı."
+        )
 
     try:
         review(
-            Path(args.package),
-            Path(args.output),
-            args.device,
+            package=Path(args.package),
+            output_dir=Path(args.output),
+            device=args.device,
         )
+
     except Exception as exc:
-        raise SystemExit(f"HATA: {exc}") from exc
+        raise SystemExit(
+            f"HATA: {exc}"
+        ) from exc
 
 
 if __name__ == "__main__":
