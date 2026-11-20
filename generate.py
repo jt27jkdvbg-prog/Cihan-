@@ -893,7 +893,7 @@ def make_keyframe_cloudflare(prompt, path):
         f"/ai/run/{CF_IMAGE_MODEL}"
     )
 
-    response = requests.post(
+        response = requests.post(
         url,
         headers={
             "Authorization": f"Bearer {token}",
@@ -904,7 +904,8 @@ def make_keyframe_cloudflare(prompt, path):
         },
         timeout=180,
     )
-        if not response.ok:
+
+    if not response.ok:
         try:
             error_detail = response.json()
         except Exception:
