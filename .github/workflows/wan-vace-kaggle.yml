@@ -614,7 +614,32 @@ jobs:
                   shared_source,
                   encoding="utf-8"
               )
+                            print("6B. T4 VAE bellek yönetimi yamalanıyor", flush=True)
 
+              vace_file = repo / "wan" / "vace.py"
+              vace_source = vace_file.read_text(encoding="utf-8")
+              vace_anchor = "        # vace context encode\n        z0 = self.vace_encode_frames("
+              vace_patch = (
+                  "        # T4 VRAM guard: release DiT weights before VAE encoding.\n"
+                  "        # The model is moved back to CUDA by the sampling loop below.\n"
+                  "        if offload_model:\n"
+                  "            self.model.cpu()\n"
+                  "            import gc\n"
+                  "            gc.collect()\n"
+                  "            torch.cuda.empty_cache()\n"
+                  "\n"
+                  "        # vace context encode\n"
+                  "        z0 = self.vace_encode_frames("
+              )
+
+              if vace_source.count(vace_anchor) != 1:
+                  raise RuntimeError(
+                      "WanVace VAE encode yama noktası beklenen şekilde bulunamadı."
+                  )
+
+              vace_source = vace_source.replace(vace_anchor, vace_patch, 1)
+              compile(vace_source, str(vace_file), "exec")
+              vace_file.write_text(vace_source, encoding="utf-8")
               print("7. FP16 GPU testi", flush=True)
 
               run([
