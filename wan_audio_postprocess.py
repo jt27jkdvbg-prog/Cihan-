@@ -2,7 +2,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Wan film audio post-processor: free-first TTS and licensed audio mixing."""
+"""Wan film audio post-processor: TTS, subtitles, audio mixing and lip-sync timeline."""
 
 import argparse
 import asyncio
@@ -52,6 +52,7 @@ REPORT = {
     "subtitle_file": None,
     "output_file": None,
     "mix_report_file": None,
+    "lip_sync_timeline_file": None,
     "mix_layers": [],
     "notes": [],
 }
@@ -338,7 +339,10 @@ def tts_gemini(
     finally:
         raw_path.unlink(missing_ok=True)
 
-    if not Path(output_path).is_file():
+    if (
+        not Path(output_path).is_file()
+        or Path(output_path).stat().st_size < 1000
+    ):
         raise RuntimeError("Gemini MP3 dosyası oluşturulamadı.")
 
 
@@ -412,6 +416,7 @@ def synthesize_scene(
     profiles,
     subtitle_entries,
     timeline,
+    lip_sync_entries,
 ):
     utterances = build_utterances(scene, profiles)
     function = PROVIDERS[provider]
@@ -457,14 +462,40 @@ def synthesize_scene(
                 f"Scene {scene_index + 1}: boş ses segmenti."
             )
 
-        words = estimate_word_times(utterance["text"], duration)
+        local_start = scene_cursor
+        local_end = local_start + duration
         scene_start = scene_index * SCENE_DURATION
+
+        words = estimate_word_times(utterance["text"], duration)
 
         for word, start, end in words:
             subtitle_entries.append({
                 "text": word,
-                "start": scene_start + scene_cursor + start,
-                "end": scene_start + scene_cursor + end,
+                "start": scene_start + local_start + start,
+                "end": scene_start + local_start + end,
+            })
+
+        # Konuşmacı bazlı senkron zaman çizelgesi.
+        # Anlatıcı kayıtları dudak senkronu listesine eklenmez.
+        if utterance["speaker_id"]:
+            lip_sync_entries.append({
+                "scene_index": scene_index,
+                "turn_index": turn_index,
+                "speaker_id": utterance["speaker_id"],
+                "character_name": profile.get("name", ""),
+                "text": utterance["text"],
+                "audio_file": str(segment_path.resolve()),
+                "audio_duration_seconds": round(duration, 4),
+                "scene_local_start_seconds": round(local_start, 4),
+                "scene_local_end_seconds": round(local_end, 4),
+                "film_start_seconds": round(
+                    scene_start + local_start, 4
+                ),
+                "film_end_seconds": round(
+                    scene_start + local_end, 4
+                ),
+                "emotion": utterance["emotion"],
+                "delivery": utterance["delivery"],
             })
 
         segments.append(segment_path)
@@ -543,7 +574,11 @@ def write_srt(entries, output_path):
             "",
         ])
 
-    Path(output_path).write_text("\n".join(lines), encoding="utf-8")
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(output_path).write_text(
+        "\n".join(lines),
+        encoding="utf-8",
+    )
 
 
 def mux_audio(video_path, audio_path, output_path):
@@ -559,6 +594,8 @@ def mux_audio(video_path, audio_path, output_path):
             "sahne süreleri veya kurgu yeniden düzenlenmeli. "
             f"Video={video_duration:.2f}s, Ses={audio_duration:.2f}s"
         )
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
     run([
         "ffmpeg", "-y",
@@ -623,7 +660,6 @@ def build_audio_mix_configuration(audio_settings, scenes, project_dir):
                 continue
 
             for effect_index, effect in enumerate(scene_effects):
-                # Text descriptions are not audio files.
                 if isinstance(effect, str):
                     if effect.strip():
                         ignored_text_effects += 1
@@ -637,6 +673,12 @@ def build_audio_mix_configuration(audio_settings, scenes, project_dir):
                     raise RuntimeError(
                         f"Sahne {scene_index + 1}, efekt {effect_index + 1}: "
                         "asset_path boş."
+                    )
+
+                if effect.get("license_verified") is not True:
+                    raise RuntimeError(
+                        f"Sahne {scene_index + 1}, efekt {effect_index + 1}: "
+                        "efekt lisansı doğrulanmamış."
                     )
 
                 try:
@@ -675,6 +717,44 @@ def build_audio_mix_configuration(audio_settings, scenes, project_dir):
     }
 
 
+def write_lip_sync_manifest(entries, output_path, scenes, profiles):
+    """Write dialogue audio timing metadata for a later GPU lip-sync stage."""
+    manifest = {
+        "schema_version": "1.0",
+        "status": "timeline_ready",
+        "lip_sync_rendered": False,
+        "description": (
+            "Dialogue audio segments and timestamps. "
+            "This manifest is input metadata, not a rendered lip-sync result."
+        ),
+        "scene_duration_seconds": SCENE_DURATION,
+        "total_scenes": len(scenes),
+        "total_dialogue_turns": len(entries),
+        "characters": [
+            {
+                "speaker_id": speaker_id,
+                "name": profile.get("name", ""),
+            }
+            for speaker_id, profile in profiles.items()
+        ],
+        "dialogue": sorted(
+            entries,
+            key=lambda item: (
+                item["film_start_seconds"],
+                item["scene_index"],
+                item["turn_index"],
+            ),
+        ),
+        "processing_requirements": {
+            "requires_video_face_tracking": True,
+            "requires_speaker_to_face_matching": True,
+            "requires_gpu_video_inference": True,
+            "skip_ambiguous_face_matches": True,
+        },
+    }
+    write_json(output_path, manifest)
+
+
 def process(project_path, video_path, output_path, work_dir):
     require_binary("ffmpeg")
     require_binary("ffprobe")
@@ -684,12 +764,35 @@ def process(project_path, video_path, output_path, work_dir):
     characters = project.get("characters") or []
     scenes = project.get("scenes") or []
 
-    if audio_settings.get("enabled") is False:
-        raise RuntimeError("Proje ses sistemi devre dışı bırakılmış.")
-    if not scenes:
-        raise RuntimeError("Film sahneleri bulunamadı.")
     if not Path(video_path).is_file():
         raise RuntimeError(f"Video bulunamadı: {video_path}")
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    work_dir = Path(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    if audio_settings.get("enabled") is False:
+        shutil.copy2(video_path, output_path)
+
+        REPORT["status"] = "success_audio_disabled"
+        REPORT["output_file"] = str(output_path)
+        REPORT["notes"].append(
+            "Proje ses sistemi kapalı. Sessiz video değiştirilmeden aktarıldı."
+        )
+
+        report_path = output_path.with_name("audio_runtime_report.json")
+        write_json(report_path, REPORT)
+
+        print("AUDIO_POSTPROCESS_SKIPPED")
+        print("Audio disabled; original video copied.")
+        print("Final:", output_path)
+        print("Report:", report_path)
+        return
+
+    if not scenes:
+        raise RuntimeError("Film sahneleri bulunamadı.")
 
     profiles = build_profiles(characters)
 
@@ -727,9 +830,6 @@ def process(project_path, video_path, output_path, work_dir):
         if fallback not in providers:
             providers.append(fallback)
 
-    work_dir = Path(work_dir)
-    work_dir.mkdir(parents=True, exist_ok=True)
-
     last_error = None
 
     for provider in providers:
@@ -738,6 +838,7 @@ def process(project_path, video_path, output_path, work_dir):
 
             scene_audio_files = []
             subtitle_entries = []
+            lip_sync_entries = []
             timeline = [0.0]
 
             for index, scene in enumerate(scenes):
@@ -749,6 +850,7 @@ def process(project_path, video_path, output_path, work_dir):
                     profiles,
                     subtitle_entries,
                     timeline,
+                    lip_sync_entries,
                 )
                 scene_audio_files.append(audio_file)
 
@@ -775,8 +877,18 @@ def process(project_path, video_path, output_path, work_dir):
             if probe_duration(combined_audio) <= 0:
                 raise RuntimeError("Birleştirilmiş ses boş.")
 
-            srt_path = Path(output_path).with_suffix(".srt")
+            srt_path = output_path.with_suffix(".srt")
             write_srt(subtitle_entries, srt_path)
+
+            timeline_path = output_path.with_name(
+                "lip_sync_timeline.json"
+            )
+            write_lip_sync_manifest(
+                lip_sync_entries,
+                timeline_path,
+                scenes,
+                profiles,
+            )
 
             video_duration = probe_duration(video_path)
 
@@ -835,7 +947,7 @@ def process(project_path, video_path, output_path, work_dir):
                 mix_config["ignored_text_effects"]
             )
 
-            mix_report_path = Path(output_path).with_name(
+            mix_report_path = output_path.with_name(
                 "audio_mix_report.json"
             )
             write_mix_report(mix_report_path, mix_report)
@@ -851,6 +963,7 @@ def process(project_path, video_path, output_path, work_dir):
             REPORT["provider_used"] = provider
             REPORT["subtitle_file"] = str(srt_path)
             REPORT["output_file"] = str(output_path)
+            REPORT["lip_sync_timeline_file"] = str(timeline_path)
 
             if provider != providers[0]:
                 REPORT["fallbacks"].append({
@@ -867,13 +980,19 @@ def process(project_path, video_path, output_path, work_dir):
                 "Altyazı zamanları ses segmentlerinden oluşturuldu."
             )
             REPORT["notes"].append(
+                "Konuşmacı bazlı dudak senkronu zaman çizelgesi oluşturuldu."
+            )
+            REPORT["notes"].append(
+                "Dudak senkronu video render işlemi henüz uygulanmadı."
+            )
+            REPORT["notes"].append(
                 "Müzik, ambiyans ve efektler yalnızca etkinleştirilmiş, "
                 "dosyası bulunan ve lisansı doğrulanmış yerel varlıklardan "
                 "miksaja eklenir. Metin efekt açıklamaları ses dosyası "
                 "olmadığı için üretilmez."
             )
 
-            report_path = Path(output_path).with_name(
+            report_path = output_path.with_name(
                 "audio_runtime_report.json"
             )
             write_json(report_path, REPORT)
@@ -882,6 +1001,7 @@ def process(project_path, video_path, output_path, work_dir):
             print("Provider:", provider)
             print("Final:", output_path)
             print("Subtitles:", srt_path)
+            print("Lip-sync timeline:", timeline_path)
             print("Mix report:", mix_report_path)
             print("Report:", report_path)
             return
@@ -902,7 +1022,7 @@ def process(project_path, video_path, output_path, work_dir):
         "Hiçbir ücretsiz ses sağlayıcısı başarılı olmadı."
     )
 
-    report_path = Path(output_path).with_name(
+    report_path = output_path.with_name(
         "audio_runtime_report.json"
     )
     write_json(report_path, REPORT)
