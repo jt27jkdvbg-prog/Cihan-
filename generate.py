@@ -904,7 +904,15 @@ def make_keyframe_cloudflare(prompt, path):
         },
         timeout=180,
     )
-    response.raise_for_status()
+        if not response.ok:
+        try:
+            error_detail = response.json()
+        except Exception:
+            error_detail = response.text[:2000]
+
+        raise RuntimeError(
+            f"Cloudflare HTTP {response.status}: {error_detail}"
+        )
 
     content_type = response.headers.get(
         "content-type",
