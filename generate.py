@@ -574,6 +574,19 @@ def normalize_script_speakers(data):
                 "delivery": safe_text(
                     turn.get("delivery")
                 ) or "natural",
+                "facial_expression": safe_text(
+                    turn.get("facial_expression")
+                ),
+                "mouth_action": safe_text(
+                    turn.get("mouth_action")
+                ),
+                "gesture": safe_text(turn.get("gesture")),
+                "body_language": safe_text(
+                    turn.get("body_language")
+                ),
+                "listener_reaction": safe_text(
+                    turn.get("listener_reaction")
+                ),
                 "listener_ids": [
                     item for item in listeners
                     if item in by_id and item != speaker_id
@@ -1695,6 +1708,54 @@ def make_motion(image_path, prompt, duration, output_path):
 
 
 def motion_text(style, scene):
+    acting_fields = (
+        ("FACIAL EXPRESSIONS", "facial_expression"),
+        ("GAZE DIRECTION", "gaze_direction"),
+        ("HEAD MOVEMENT", "head_movement"),
+        ("BODY LANGUAGE", "body_language"),
+        ("GESTURES", "gesture_direction"),
+        ("ACTING DIRECTION", "acting_direction"),
+    )
+
+    acting_details = []
+
+    for label, field in acting_fields:
+        value = safe_text(scene.get(field))
+        if value:
+            acting_details.append(f"{label}:\n{value}")
+
+    dialogue_details = []
+
+    for turn in scene.get("dialogue_turns") or []:
+        if not isinstance(turn, dict):
+            continue
+
+        speaker = safe_text(turn.get("speaker"))
+        expression = safe_text(turn.get("facial_expression"))
+        mouth = safe_text(turn.get("mouth_action"))
+        gesture = safe_text(turn.get("gesture"))
+        body = safe_text(turn.get("body_language"))
+        reaction = safe_text(turn.get("listener_reaction"))
+
+        details = [
+            f"ACTIVE SPEAKER: {speaker}",
+            f"DIALOGUE: {safe_text(turn.get('text'))}",
+            f"EMOTION: {safe_text(turn.get('emotion'))}",
+            f"DELIVERY: {safe_text(turn.get('delivery'))}",
+        ]
+
+        for label, value in (
+            ("FACIAL EXPRESSION", expression),
+            ("MOUTH ACTION", mouth),
+            ("GESTURE", gesture),
+            ("BODY LANGUAGE", body),
+            ("LISTENER REACTION", reaction),
+        ):
+            if value:
+                details.append(f"{label}: {value}")
+
+        dialogue_details.append("\n".join(details))
+
     return f"""
 VISUAL STYLE:
 {style}
@@ -1707,6 +1768,23 @@ PHYSICAL ACTION:
 
 ANIMATION:
 {safe_text(scene.get('motion_prompt'))}
+
+CHARACTER PERFORMANCE:
+{chr(10).join(acting_details)}
+
+DIALOGUE PERFORMANCE:
+{chr(10).join(dialogue_details)}
+
+PERFORMANCE RULES:
+- Use natural, continuous facial animation.
+- Preserve character identity and facial structure.
+- Use meaningful eye contact and natural blinking.
+- Animate head movement and gestures according to emotion.
+- The active speaker should be visually identifiable.
+- Listeners should react naturally without appearing to speak.
+- Avoid frozen expressions and repetitive gestures.
+- Keep body movement physically believable.
+- Do not create random or exaggerated mouth movements.
 
 Preserve character identity, clothing and proportions.
 Use natural body movement and cinematic camera motion.
