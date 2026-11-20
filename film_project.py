@@ -507,6 +507,15 @@ def build_film_project(
                 "text": dialogue_text,
                 "emotion": _text(turn.get("emotion")) or "neutral",
                 "delivery": _text(turn.get("delivery")) or "natural",
+                "facial_expression": _text(
+                    turn.get("facial_expression")
+                ),
+                "mouth_action": _text(turn.get("mouth_action")),
+                "gesture": _text(turn.get("gesture")),
+                "body_language": _text(turn.get("body_language")),
+                "listener_reaction": _text(
+                    turn.get("listener_reaction")
+                ),
                 "listener_ids": listeners,
             })
 
@@ -554,6 +563,14 @@ def build_film_project(
             "camera": _text(item.get("camera")),
             "image_prompt": _text(item.get("image_prompt")),
             "motion_prompt": _text(item.get("motion_prompt")),
+            "facial_expression": _text(
+                item.get("facial_expression")
+            ),
+            "gaze_direction": _text(item.get("gaze_direction")),
+            "head_movement": _text(item.get("head_movement")),
+            "body_language": _text(item.get("body_language")),
+            "gesture_direction": _text(item.get("gesture_direction")),
+            "acting_direction": _text(item.get("acting_direction")),
             "sound": _text(item.get("sound")),
             "sound_effects": normalized_effects,
             "ambience": _text(item.get("ambience")),
