@@ -614,7 +614,7 @@ jobs:
                   shared_source,
                   encoding="utf-8"
               )
-                            print("6B. T4 VAE bellek yönetimi yamalanıyor", flush=True)
+              print("6B. T4 VAE bellek yönetimi yamalanıyor", flush=True)
 
               vace_file = repo / "wan" / "vace.py"
               vace_source = vace_file.read_text(encoding="utf-8")
