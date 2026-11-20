@@ -1,4 +1,3 @@
-
 name: Wan Multi-Scene Film Generator
 
 on:
@@ -1453,8 +1452,12 @@ jobs:
           REPORT=$(find output -type f -name "performance_report.json" | head -n 1)
 
           if [ -n "$REPORT" ]; then
-            cp "$REPORT" output/performance_report.json
-            echo "Performans raporu bulundu ve kopyalandı."
+            if [ "$REPORT" -ef "output/performance_report.json" ]; then
+              echo "Performans raporu zaten hedef konumda."
+            else
+              cp "$REPORT" output/performance_report.json
+            fi
+            echo "Performans raporu bulundu ve hazır."
           else
             echo "Performans raporu bulunamadı."
             exit 1
@@ -1463,13 +1466,17 @@ jobs:
           REFERENCE_STATUS=$(find output -type f -name "reference_runtime_status.json" | head -n 1)
 
           if [ -n "$REFERENCE_STATUS" ]; then
-            cp "$REFERENCE_STATUS" output/reference_runtime_status.json
-            echo "Karakter referans doğrulama raporu bulundu."
+            if [ "$REFERENCE_STATUS" -ef "output/reference_runtime_status.json" ]; then
+              echo "Referans raporu zaten hedef konumda."
+            else
+              cp "$REFERENCE_STATUS" output/reference_runtime_status.json
+            fi
+            echo "Karakter referans doğrulama raporu hazır."
           else
             echo "Karakter referans doğrulama raporu bulunamadı."
             exit 1
           fi
-          
+
       - name: Film seslendirme ve altyazı üretimi
         if: ${{ inputs.run_mode == 'production' && inputs.project_json != '' }}
         env:
@@ -1505,4 +1512,3 @@ jobs:
             output/cost_report.json
           if-no-files-found: error
           retention-days: 7
-
