@@ -3,13 +3,15 @@
 # -*- coding: utf-8 -*-
 
 """
-MuseTalk Face Approval v1.1
+MuseTalk Face Approval v1.2
 
-Yüz inceleme raporunu doğrular ve yalnızca insan
-tarafından onaylanan diyalogları yeni pakete aktarır.
+İnsan tarafından incelenmiş yüzleri onaylar.
+Otomatik yüz veya konuşmacı eşleştirmesi yapmaz.
 
---interactive kullanılırsa onayları terminalden toplar.
-Otomatik konuşmacı-yüz eşleştirmesi yapmaz.
+Aşamalar:
+1. --create-template ile onay şablonu üret.
+2. JSON dosyasını manuel olarak düzenle.
+3. --approval-manifest ile onayları uygula.
 """
 
 from __future__ import annotations
@@ -22,28 +24,52 @@ from pathlib import Path
 from typing import Any
 
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 
 def read_json(path: Path) -> dict[str, Any]:
     if not path.is_file():
-        raise FileNotFoundError(f"Dosya bulunamadı: {path}")
+        raise FileNotFoundError(
+            f"Dosya bulunamadı: {path}"
+        )
 
-    data = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(
+            path.read_text(encoding="utf-8")
+        )
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"JSON okunamadı: {exc}"
+        ) from exc
 
     if not isinstance(data, dict):
-        raise RuntimeError(f"Geçersiz JSON: {path}")
+        raise RuntimeError(
+            f"Geçersiz JSON: {path}"
+        )
 
     return data
 
 
-def write_json(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def write_json(
+    path: Path,
+    data: dict[str, Any],
+) -> None:
 
-    temporary = path.with_suffix(path.suffix + ".tmp")
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    temporary = path.with_suffix(
+        path.suffix + ".tmp"
+    )
 
     temporary.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        json.dumps(
+            data,
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n",
         encoding="utf-8",
     )
 
@@ -67,63 +93,134 @@ def validate_review_record(
         reviewed.get("speaker_id", "")
     ).strip()
 
-    if not expected_speaker or reviewed_speaker != expected_speaker:
-        return False, "Konuşmacı kimliği kaynak kayıtla eşleşmiyor."
+    if (
+        not expected_speaker
+        or reviewed_speaker != expected_speaker
+    ):
+        return False, "Konuşmacı kimliği eşleşmiyor."
 
     try:
-        original_start = float(original["film_start_seconds"])
-        original_end = float(original["film_end_seconds"])
-        reviewed_start = float(reviewed["film_start_seconds"])
-        reviewed_end = float(reviewed["film_end_seconds"])
+        original_start = float(
+            original["film_start_seconds"]
+        )
+        original_end = float(
+            original["film_end_seconds"]
+        )
+        reviewed_start = float(
+            reviewed["film_start_seconds"]
+        )
+        reviewed_end = float(
+            reviewed["film_end_seconds"]
+        )
     except (KeyError, TypeError, ValueError):
         return False, "Zaman bilgileri geçersiz."
 
     if abs(original_start - reviewed_start) > 0.05:
-        return False, "Başlangıç zamanı kaynak kayıtla eşleşmiyor."
+        return False, "Başlangıç zamanı eşleşmiyor."
 
     if abs(original_end - reviewed_end) > 0.05:
-        return False, "Bitiş zamanı kaynak kayıtla eşleşmiyor."
+        return False, "Bitiş zamanı eşleşmiyor."
 
     samples = reviewed.get("sample_frames")
 
     if not isinstance(samples, list) or len(samples) != 3:
-        return False, "Üç örnek kare incelemesi bulunamadı."
+        return False, "Üç örnek kare bulunamadı."
 
     try:
-        counts = [int(sample["face_count"]) for sample in samples]
+        counts = [
+            int(sample["face_count"])
+            for sample in samples
+        ]
     except (KeyError, TypeError, ValueError):
-        return False, "Örnek kare yüz sayıları geçersiz."
+        return False, "Yüz sayıları geçersiz."
 
     if counts != [1, 1, 1]:
-        return False, "Üç örnek karenin tamamında tek yüz bulunmuyor."
+        return False, (
+            "Üç örnek karenin tamamında tek yüz bulunmuyor."
+        )
 
-    return True, "İnceleme kaydı geçerli."
+    return True, "İnceleme geçerli."
 
 
-def collect_interactive_approvals(
-    original_dialogue: list,
-    reviewed_dialogue: list,
+def build_review_index(
+    review_dialogue: list,
+) -> dict[int, dict]:
+
+    result = {}
+
+    for item in review_dialogue:
+
+        if not isinstance(item, dict):
+            raise RuntimeError(
+                "İnceleme kaydı geçersiz."
+            )
+
+        index = item.get("dialogue_index")
+
+        if not isinstance(index, int) or index < 0:
+            raise RuntimeError(
+                "Diyalog indeksi geçersiz."
+            )
+
+        if index in result:
+            raise RuntimeError(
+                f"Tekrarlanan diyalog indeksi: {index}"
+            )
+
+        result[index] = item
+
+    return result
+
+
+def create_approval_template(
+    timeline_path: Path,
     review_path: Path,
-) -> None:
+    output_path: Path,
+) -> dict[str, Any]:
 
-    review_by_index = {}
+    timeline = read_json(timeline_path)
+    review = read_json(review_path)
 
-    for item in reviewed_dialogue:
-        if isinstance(item, dict):
-            index = item.get("dialogue_index")
-            if index is not None:
-                review_by_index[index] = item
+    if timeline.get("status") != "package_ready":
+        raise RuntimeError(
+            "Kaynak paket package_ready durumunda değil."
+        )
 
-    print("\nMANUEL YÜZ ONAYI")
-    print("Her diyalog için üç önizleme görselini kontrol et.")
-    print("Görsellerin yolları aşağıda gösterilecek.")
-    print("Onay için konuşmacı kimliğini aynen yaz.")
-    print("Atlamak için ENTER tuşuna bas.\n")
+    if review.get("status") != "face_review_ready":
+        raise RuntimeError(
+            "Yüz raporu face_review_ready durumunda değil."
+        )
+
+    original_dialogue = timeline.get("dialogue")
+    reviewed_dialogue = review.get("dialogue")
+
+    if (
+        not isinstance(original_dialogue, list)
+        or not original_dialogue
+    ):
+        raise RuntimeError(
+            "Kaynak diyalog listesi boş."
+        )
+
+    if not isinstance(reviewed_dialogue, list):
+        raise RuntimeError(
+            "İnceleme diyalog listesi geçersiz."
+        )
+
+    review_by_index = build_review_index(
+        reviewed_dialogue
+    )
+
+    approvals = []
 
     for index, original in enumerate(original_dialogue):
+
+        if not isinstance(original, dict):
+            continue
+
         reviewed = review_by_index.get(index)
 
-        if not isinstance(original, dict) or not isinstance(reviewed, dict):
+        if reviewed is None:
             continue
 
         valid, reason = validate_review_record(
@@ -132,60 +229,90 @@ def collect_interactive_approvals(
             index,
         )
 
-        if not valid:
-            print(f"Diyalog {index}: ATLANDI — {reason}")
-            continue
+        samples = reviewed.get("sample_frames", [])
 
-        speaker_id = str(original.get("speaker_id", "")).strip()
+        previews = [
+            item.get("preview", "")
+            for item in samples
+            if isinstance(item, dict)
+        ]
 
-        print("=" * 60)
-        print(f"Diyalog: {index}")
-        print(f"Konuşmacı kimliği: {speaker_id}")
-        print(f"Metin: {original.get('text', '')}")
-        print(
-            f"Zaman: {original.get('film_start_seconds')} - "
-            f"{original.get('film_end_seconds')} saniye"
-        )
+        approvals.append({
+            "dialogue_index": index,
+            "speaker_id": str(
+                original.get("speaker_id", "")
+            ),
+            "text": str(
+                original.get("text", "")
+            ),
+            "preview_images": previews,
+            "eligible_for_review": valid,
+            "validation_note": reason,
+            "approved": False,
+            "confirmed_speaker_id": "",
+            "selected_face_index": None,
+            "human_review_note": "",
+        })
 
-        for sample in reviewed["sample_frames"]:
-            preview = sample.get("preview", "")
-            preview_path = (review_path.parent / preview).resolve()
-            print(f"Önizleme: {preview_path}")
+    manifest = {
+        "version": VERSION,
+        "status": "awaiting_human_review",
+        "instructions": (
+            "Görselleri incele. Onayladığın kayıtta "
+            "approved değerini true yap ve "
+            "confirmed_speaker_id alanına speaker_id "
+            "değerini aynen yaz. Tek yüzlü örneklerde "
+            "selected_face_index değeri 0 olmalıdır. "
+            "Emin olmadığın kayıtları onaylama."
+        ),
+        "automatic_approval": False,
+        "approvals": approvals,
+    }
 
-        answer = input(
-            "\nBu üç görüntüdeki kişi gerçekten bu konuşmacı mı? "
-            "Onay için speaker_id yaz: "
-        ).strip()
+    write_json(
+        output_path,
+        manifest,
+    )
 
-        if answer == speaker_id:
-            reviewed["human_approved"] = True
-            reviewed["confirmed_speaker_id"] = speaker_id
-            reviewed["selected_face_index"] = 0
-            print("İnsan onayı kaydedildi.\n")
-        else:
-            reviewed["human_approved"] = False
-            reviewed["confirmed_speaker_id"] = ""
-            reviewed["selected_face_index"] = None
-            print("Bu diyalog onaylanmadı.\n")
+    result = {
+        "status": "template_created",
+        "template": str(output_path.resolve()),
+        "dialogue_count": len(approvals),
+        "eligible_count": sum(
+            1 for item in approvals
+            if item["eligible_for_review"]
+        ),
+        "approved_count": 0,
+    }
 
-    updated_review = read_json(review_path)
-    updated_review["dialogue"] = reviewed_dialogue
-    updated_review["interactive_approval_completed"] = True
+    print(
+        json.dumps(
+            result,
+            ensure_ascii=False,
+            indent=2,
+        ),
+        flush=True,
+    )
 
-    write_json(review_path, updated_review)
+    return result
 
 
-def approve(
+def apply_approval_manifest(
     package: Path,
     review_path: Path,
+    manifest_path: Path,
     output_package: Path,
 ) -> dict[str, Any]:
 
     package = package.resolve()
     review_path = review_path.resolve()
+    manifest_path = manifest_path.resolve()
     output_package = output_package.resolve()
 
-    timeline_path = package / "lip_sync_timeline.json"
+    timeline_path = (
+        package / "lip_sync_timeline.json"
+    )
+
     video_path = package / "video.mp4"
 
     if not timeline_path.is_file():
@@ -194,9 +321,6 @@ def approve(
     if not video_path.is_file():
         raise FileNotFoundError(video_path)
 
-    if not review_path.is_file():
-        raise FileNotFoundError(review_path)
-
     if output_package.exists():
         raise FileExistsError(
             f"Çıktı klasörü zaten mevcut: {output_package}"
@@ -204,36 +328,73 @@ def approve(
 
     timeline = read_json(timeline_path)
     review = read_json(review_path)
+    manifest = read_json(manifest_path)
 
     if timeline.get("status") != "package_ready":
-        raise RuntimeError("Kaynak zaman çizelgesi package_ready değil.")
+        raise RuntimeError(
+            "Kaynak zaman çizelgesi package_ready değil."
+        )
 
     if review.get("status") != "face_review_ready":
-        raise RuntimeError("Yüz inceleme raporu face_review_ready değil.")
+        raise RuntimeError(
+            "Yüz inceleme raporu geçerli değil."
+        )
+
+    if manifest.get("version") != VERSION:
+        raise RuntimeError(
+            "Onay manifest sürümü uyumsuz. "
+            f"Beklenen: {VERSION}"
+        )
+
+    if manifest.get("automatic_approval") is not False:
+        raise RuntimeError(
+            "Otomatik onay kabul edilmiyor."
+        )
 
     original_dialogue = timeline.get("dialogue")
     reviewed_dialogue = review.get("dialogue")
+    approvals = manifest.get("approvals")
 
-    if not isinstance(original_dialogue, list) or not original_dialogue:
-        raise RuntimeError("Kaynak diyalog listesi geçersiz veya boş.")
+    if not isinstance(original_dialogue, list):
+        raise RuntimeError(
+            "Kaynak diyalog listesi geçersiz."
+        )
 
     if not isinstance(reviewed_dialogue, list):
-        raise RuntimeError("İnceleme diyalog listesi geçersiz.")
+        raise RuntimeError(
+            "İnceleme diyalog listesi geçersiz."
+        )
 
-    review_by_index = {}
+    if not isinstance(approvals, list):
+        raise RuntimeError(
+            "Onay listesi geçersiz."
+        )
 
-    for item in reviewed_dialogue:
+    review_by_index = build_review_index(
+        reviewed_dialogue
+    )
+
+    approval_by_index = {}
+
+    for item in approvals:
+
         if not isinstance(item, dict):
-            continue
+            raise RuntimeError(
+                "Onay kaydı geçersiz."
+            )
 
         index = item.get("dialogue_index")
 
-        if not isinstance(index, int) or index in review_by_index:
+        if (
+            not isinstance(index, int)
+            or index < 0
+            or index in approval_by_index
+        ):
             raise RuntimeError(
-                "İnceleme raporunda eksik veya tekrarlanan diyalog indeksi."
+                "Eksik veya tekrarlanan onay indeksi."
             )
 
-        review_by_index[index] = item
+        approval_by_index[index] = item
 
     approved_dialogue = []
     approved_indices = []
@@ -244,16 +405,24 @@ def approve(
         if not isinstance(original, dict):
             skipped.append({
                 "dialogue_index": index,
-                "reason": "Kaynak diyalog kaydı geçersiz.",
+                "reason": "Kaynak kayıt geçersiz.",
             })
             continue
 
+        approval = approval_by_index.get(index)
         reviewed = review_by_index.get(index)
 
-        if reviewed is None:
+        if approval is None or reviewed is None:
             skipped.append({
                 "dialogue_index": index,
-                "reason": "Yüz inceleme kaydı bulunamadı.",
+                "reason": "Onay veya inceleme kaydı yok.",
+            })
+            continue
+
+        if approval.get("approved") is not True:
+            skipped.append({
+                "dialogue_index": index,
+                "reason": "İnsan onayı verilmedi.",
             })
             continue
 
@@ -270,36 +439,41 @@ def approve(
             })
             continue
 
-        if reviewed.get("human_approved") is not True:
-            skipped.append({
-                "dialogue_index": index,
-                "reason": "İnsan onayı verilmemiş.",
-            })
-            continue
-
         expected_speaker = str(
             original.get("speaker_id", "")
         ).strip()
 
         confirmed_speaker = str(
-            reviewed.get("confirmed_speaker_id", "")
+            approval.get("confirmed_speaker_id", "")
         ).strip()
 
-        if not expected_speaker or confirmed_speaker != expected_speaker:
+        if (
+            not expected_speaker
+            or confirmed_speaker != expected_speaker
+            or approval.get("speaker_id") != expected_speaker
+        ):
             skipped.append({
                 "dialogue_index": index,
-                "reason": "Onaylanan konuşmacı kimliği eşleşmiyor.",
+                "reason": "Konuşmacı onayı eşleşmiyor.",
             })
             continue
 
-        if reviewed.get("selected_face_index") != 0:
+        if approval.get("eligible_for_review") is not True:
             skipped.append({
                 "dialogue_index": index,
-                "reason": "Tek yüzlü çekim için yüz indeksi 0 olmalı.",
+                "reason": "Kayıt incelemeye uygun değil.",
+            })
+            continue
+
+        if approval.get("selected_face_index") != 0:
+            skipped.append({
+                "dialogue_index": index,
+                "reason": "Yüz indeksi 0 olarak onaylanmalı.",
             })
             continue
 
         entry = dict(original)
+
         entry["face_count"] = 1
         entry["target_face_confirmed"] = True
         entry["selected_face_index"] = 0
@@ -315,17 +489,28 @@ def approve(
             "Hiçbir çıktı paketi oluşturulmadı."
         )
 
-    output_package.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(package, output_package)
+    output_package.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    shutil.copytree(
+        package,
+        output_package,
+    )
 
     updated_timeline = dict(timeline)
+
     updated_timeline["dialogue"] = approved_dialogue
     updated_timeline["status"] = "package_ready"
     updated_timeline["lip_sync_rendered"] = False
+
     updated_timeline["face_approval"] = {
         "version": VERSION,
-        "method": "manual_review",
-        "approved_dialogue_count": len(approved_dialogue),
+        "method": "manual_review_manifest",
+        "approved_dialogue_count": len(
+            approved_dialogue
+        ),
         "skipped_dialogue_count": len(skipped),
         "automatic_approval": False,
     }
@@ -338,15 +523,18 @@ def approve(
     report = {
         "version": VERSION,
         "status": "approval_completed",
-        "approved_dialogue_count": len(approved_dialogue),
+        "approved_dialogue_count": len(
+            approved_dialogue
+        ),
         "skipped_dialogue_count": len(skipped),
         "approved_dialogue_indices": approved_indices,
         "skipped": skipped,
         "output_package": str(output_package),
+        "automatic_approval": False,
         "note": (
-            "Only manually approved single-face dialogue entries "
-            "were copied. No automatic speaker identity matching "
-            "or approval was performed."
+            "Only manually approved dialogue entries "
+            "were copied. No automatic face or speaker "
+            "identity matching was performed."
         ),
     }
 
@@ -355,21 +543,45 @@ def approve(
         report,
     )
 
-    print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
+    print(
+        json.dumps(
+            report,
+            ensure_ascii=False,
+            indent=2,
+        ),
+        flush=True,
+    )
 
     return report
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
 
-    parser.add_argument("--package", required=True)
-    parser.add_argument("--review", required=True)
-    parser.add_argument("--output-package", required=True)
+    parser = argparse.ArgumentParser(
+        description="MuseTalk manuel yüz onay sistemi."
+    )
+
     parser.add_argument(
-        "--interactive",
+        "--package",
+        required=True,
+    )
+
+    parser.add_argument(
+        "--review",
+        required=True,
+    )
+
+    parser.add_argument(
+        "--output-package",
+    )
+
+    parser.add_argument(
+        "--create-template",
         action="store_true",
-        help="Yüz onaylarını terminalden tek tek al.",
+    )
+
+    parser.add_argument(
+        "--approval-manifest",
     )
 
     args = parser.parse_args()
@@ -378,35 +590,50 @@ def main() -> None:
     review_path = Path(args.review).resolve()
 
     try:
-        if args.interactive:
-            timeline = read_json(package / "lip_sync_timeline.json")
-            review = read_json(review_path)
 
-            original_dialogue = timeline.get("dialogue")
-            reviewed_dialogue = review.get("dialogue")
+        if args.create_template:
 
-            if not isinstance(original_dialogue, list):
-                raise RuntimeError("Kaynak diyalog listesi geçersiz.")
-
-            if not isinstance(reviewed_dialogue, list):
-                raise RuntimeError("İnceleme diyalog listesi geçersiz.")
-
-            collect_interactive_approvals(
-                original_dialogue,
-                reviewed_dialogue,
-                review_path,
+            output_path = Path(
+                args.approval_manifest
+                or "face_approval_manifest.json"
             )
 
-        approve(
+            create_approval_template(
+                package / "lip_sync_timeline.json",
+                review_path,
+                output_path,
+            )
+
+            return
+
+        if not args.approval_manifest:
+            raise RuntimeError(
+                "--approval-manifest gerekli."
+            )
+
+        if not args.output_package:
+            raise RuntimeError(
+                "--output-package gerekli."
+            )
+
+        apply_approval_manifest(
             package=package,
             review_path=review_path,
-            output_package=Path(args.output_package),
+            manifest_path=Path(
+                args.approval_manifest
+            ),
+            output_package=Path(
+                args.output_package
+            ),
         )
 
     except Exception as exc:
-        raise SystemExit(f"HATA: {exc}") from exc
+        raise SystemExit(
+            f"HATA: {exc}"
+        ) from exc
 
 
 if __name__ == "__main__":
     main()
+
 
