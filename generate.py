@@ -925,7 +925,7 @@ def make_keyframe_cloudflare(prompt, path):
             error_detail = response.text[:2000]
 
         raise RuntimeError(
-            f"Cloudflare HTTP {response.status}: {error_detail}"
+           f"Cloudflare HTTP {response.status_code}: {error_detail}" 
         )
 
     content_type = response.headers.get(
