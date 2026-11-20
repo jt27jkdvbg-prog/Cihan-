@@ -893,7 +893,7 @@ def make_keyframe_cloudflare(prompt, path):
         f"/ai/run/{CF_IMAGE_MODEL}"
     )
 
-        response = requests.post(
+    response = requests.post(
         url,
         headers={
             "Authorization": f"Bearer {token}",
