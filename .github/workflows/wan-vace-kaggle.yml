@@ -397,8 +397,6 @@ jobs:
                   worker_dir = Path(__file__).resolve().parent
                   sys.path.insert(0, str(worker_dir))
 
-                  # load_reference_bundle worker.py içine gömülüdür.
-
                   input_root = Path("/kaggle/input")
                   if not input_root.is_dir():
                       raise RuntimeError(
@@ -613,6 +611,7 @@ jobs:
                   shared_source,
                   encoding="utf-8"
               )
+
               print("6B. T4 VAE bellek yönetimi yamalanıyor", flush=True)
 
               vace_file = repo / "wan" / "vace.py"
@@ -639,6 +638,7 @@ jobs:
               vace_source = vace_source.replace(vace_anchor, vace_patch, 1)
               compile(vace_source, str(vace_file), "exec")
               vace_file.write_text(vace_source, encoding="utf-8")
+
               print("7. FP16 GPU testi", flush=True)
 
               run([
@@ -1396,15 +1396,12 @@ jobs:
 
           KERNEL="${KAGGLE_USERNAME,,}/cihan-multi-scene-film-worker"
 
-          # 165 x 120 saniye = 5 saat 30 dakika.
-          # GitHub Actions'ın 6 saatlik iş sınırına pay bırakılır.
           for i in $(seq 1 165); do
             STATUS=$(kaggle kernels status "$KERNEL" 2>&1 || true)
             STATUS_UPPER=$(printf '%s' "$STATUS" | tr '[:lower:]' '[:upper:]')
             echo "Kontrol $i/165"
             echo "$STATUS"
 
-            # INCOMPLETE kelimesinin yanlışlıkla COMPLETE sayılmasını önle.
             if printf '%s' "$STATUS_UPPER" | grep -Eq '(^|[^A-Z])COMPLETE([^A-Z]|$)'; then
               echo "Kaggle üretimi tamamlandı."
               exit 0
@@ -1510,5 +1507,6 @@ jobs:
             output/performance_report.json
             output/reference_runtime_status.json
             output/cost_report.json
+            .work/audio/lip_sync_timeline.json
           if-no-files-found: error
           retention-days: 7
