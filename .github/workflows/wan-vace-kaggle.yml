@@ -1499,7 +1499,7 @@ jobs:
 
           python musetalk_lipsync_prepare.py \
             --video output/final-film.mp4 \
-            --timeline .work/audio/lip_sync_timeline.json \
+            --timeline output/lip_sync_timeline.json \
             --output-dir output/musetalk_input
 
           test -s output/musetalk_input.zip
@@ -1519,6 +1519,6 @@ jobs:
             output/performance_report.json
             output/reference_runtime_status.json
             output/cost_report.json
-            .work/audio/lip_sync_timeline.json
+            output/lip_sync_timeline.json
           if-no-files-found: error
           retention-days: 7
