@@ -1492,7 +1492,18 @@ jobs:
             --video output/silent-film.mp4 \
             --output output/final-film.mp4 \
             --work-dir .work/audio
+      - name: MuseTalk giriş paketini hazırla
+        if: ${{ inputs.run_mode == 'production' && inputs.project_json != '' }}
+        run: |
+          set -euo pipefail
 
+          python musetalk_lipsync_prepare.py \
+            --video output/final-film.mp4 \
+            --timeline .work/audio/lip_sync_timeline.json \
+            --output-dir output/musetalk_input
+
+          test -s output/musetalk_input.zip
+          echo "MuseTalk giriş paketi hazır."
       - name: Film ve performans raporunu sakla
         if: ${{ inputs.run_mode == 'production' }}
         uses: actions/upload-artifact@v4
@@ -1501,6 +1512,7 @@ jobs:
           path: |
             output/final-film.mp4
             output/**/*.mp4
+            output/musetalk_input.zip
             output/audio_runtime_report.json
             output/audio_mix_report.json
             output/final-film.srt
