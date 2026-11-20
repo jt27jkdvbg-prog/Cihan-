@@ -3,25 +3,24 @@
 # -*- coding: utf-8 -*-
 
 """
-MuseTalk 1.5 Kaggle GPU Worker
+MuseTalk 1.5 Kaggle GPU Worker - v1.1
 
-- Validates a prepared MuseTalk package.
-- Checks GPU and model files.
-- Validates dialogue timing and audio references.
-- Skips ambiguous multi-face tasks unless explicitly approved.
-- Creates the official MuseTalk inference YAML.
-- Runs MuseTalk 1.5 inference.
-- Writes a machine-readable processing report.
+Her diyalog için:
+1. Ana videodan doğru zaman aralığını keser.
+2. İlgili konuşmanın ses dosyasını kullanır.
+3. MuseTalk'a yalnızca o kısa video klibini gönderir.
+4. Her klip için ayrı çıktı oluşturur.
+5. Çıktıları doğrular ve raporlar.
 
-This worker does not claim that skipped or failed tasks
-have been lip-synced.
+ÖNEMLİ:
+Bu sürüm senkronize diyalog klipleri üretir.
+Henüz bunları ana filmin üzerine birleştirmez.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -31,7 +30,8 @@ from pathlib import Path
 from typing import Any
 
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
+FPS = 25
 
 MODEL_FILES = {
     "unet": "models/musetalkV15/unet.pth",
@@ -49,29 +49,55 @@ MODEL_FILES = {
 
 
 def log(message: str) -> None:
-    print(
-        f"[MuseTalk Worker] {message}",
-        flush=True,
-    )
+    print(f"[MuseTalk Worker] {message}", flush=True)
 
 
 def fail(message: str) -> None:
     raise RuntimeError(message)
 
 
+def run(
+    command: list[str],
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess:
+
+    log("Komut: " + " ".join(command))
+
+    result = subprocess.run(
+        command,
+        cwd=str(cwd) if cwd else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+
+    if result.stdout:
+        print(result.stdout[-12000:], flush=True)
+
+    if result.returncode != 0:
+        fail(
+            f"Komut başarısız. Çıkış kodu: "
+            f"{result.returncode}"
+        )
+
+    return result
+
+
 def read_json(path: Path) -> dict[str, Any]:
+
     if not path.is_file():
-        fail(f"JSON dosyası bulunamadı: {path}")
+        fail(f"JSON bulunamadı: {path}")
 
     try:
         data = json.loads(
             path.read_text(encoding="utf-8")
         )
     except Exception as exc:
-        fail(f"JSON okunamadı: {path}: {exc}")
+        fail(f"JSON okunamadı: {exc}")
 
     if not isinstance(data, dict):
-        fail(f"JSON nesnesi geçersiz: {path}")
+        fail("JSON kök verisi nesne olmalıdır.")
 
     return data
 
@@ -102,34 +128,31 @@ def write_json(
     temporary.replace(path)
 
 
-def run(
-    command: list[str],
-    cwd: Path | None = None,
-    env: dict[str, str] | None = None,
-) -> None:
+def require_binary(name: str) -> None:
 
-    log("Komut çalıştırılıyor:")
-    log(" ".join(command))
-
-    process = subprocess.run(
-        command,
-        cwd=str(cwd) if cwd else None,
-        env=env,
-        check=False,
-    )
-
-    if process.returncode != 0:
-        fail(
-            "Komut başarısız oldu. "
-            f"Çıkış kodu: {process.returncode}"
-        )
-
-
-def check_binary(name: str) -> None:
     if shutil.which(name) is None:
-        fail(
-            f"Gerekli program bulunamadı: {name}"
-        )
+        fail(f"Gerekli program bulunamadı: {name}")
+
+
+def probe_duration(path: Path) -> float:
+
+    result = run([
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ])
+
+    try:
+        duration = float(result.stdout.strip())
+    except Exception:
+        fail(f"Medya süresi okunamadı: {path}")
+
+    if duration <= 0:
+        fail(f"Medya süresi geçersiz: {path}")
+
+    return duration
 
 
 def check_gpu() -> dict[str, Any]:
@@ -137,9 +160,7 @@ def check_gpu() -> dict[str, Any]:
     try:
         import torch
     except ImportError:
-        fail(
-            "PyTorch kurulu değil."
-        )
+        fail("PyTorch kurulu değil.")
 
     if not torch.cuda.is_available():
         fail(
@@ -160,133 +181,58 @@ def check_gpu() -> dict[str, Any]:
         "cuda_version": torch.version.cuda,
     }
 
-    log(
-        "GPU: "
-        + result["device_name"]
-    )
-
-    log(
-        "GPU belleği: "
-        + str(result["total_memory_gb"])
-        + " GB"
-    )
+    log("GPU: " + result["device_name"])
 
     return result
 
 
 def check_models(
-    project_root: Path,
+    root: Path,
 ) -> dict[str, str]:
 
     checked = {}
 
-    for name, relative_path in MODEL_FILES.items():
+    for name, relative in MODEL_FILES.items():
 
-        path = project_root / relative_path
+        path = root / relative
 
         if not path.is_file():
-            fail(
-                f"Model dosyası eksik: {path}"
-            )
+            fail(f"Model dosyası eksik: {path}")
 
         if path.stat().st_size == 0:
-            fail(
-                f"Model dosyası boş: {path}"
-            )
+            fail(f"Model dosyası boş: {path}")
 
-        checked[name] = str(path)
+        checked[name] = str(path.resolve())
 
     return checked
 
 
 def validate_package(
     package: Path,
-) -> tuple[Path, Path, dict[str, Any]]:
+) -> tuple[Path, dict[str, Any]]:
 
     package = package.resolve()
 
     video = package / "video.mp4"
-    timeline_path = (
-        package / "lip_sync_timeline.json"
-    )
+    timeline_path = package / "lip_sync_timeline.json"
 
     if not video.is_file():
-        fail(
-            f"Video bulunamadı: {video}"
-        )
+        fail(f"Kaynak video bulunamadı: {video}")
 
     timeline = read_json(timeline_path)
 
-    if timeline.get("lip_sync_rendered") is True:
-        fail(
-            "Bu paket zaten işlenmiş olarak işaretli."
-        )
-
     if timeline.get("status") != "package_ready":
-        fail(
-            "Paket durumu package_ready değil."
-        )
+        fail("Paket durumu package_ready değil.")
+
+    if timeline.get("lip_sync_rendered") is True:
+        fail("Paket zaten işlenmiş olarak işaretli.")
 
     dialogue = timeline.get("dialogue")
 
     if not isinstance(dialogue, list) or not dialogue:
-        fail(
-            "Diyalog listesi boş."
-        )
+        fail("Diyalog listesi boş.")
 
-    for index, item in enumerate(dialogue):
-
-        if not isinstance(item, dict):
-            fail(
-                f"Diyalog kaydı geçersiz: {index}"
-            )
-
-        for key in (
-            "speaker_id",
-            "audio_file",
-            "film_start_seconds",
-            "film_end_seconds",
-        ):
-            if key not in item:
-                fail(
-                    f"Diyalog {index}: {key} eksik."
-                )
-
-        start = float(
-            item["film_start_seconds"]
-        )
-
-        end = float(
-            item["film_end_seconds"]
-        )
-
-        if start < 0 or end <= start:
-            fail(
-                f"Diyalog {index}: zaman aralığı geçersiz."
-            )
-
-        audio = (
-            package / str(item["audio_file"])
-        ).resolve()
-
-        try:
-            audio.relative_to(package)
-        except ValueError:
-            fail(
-                f"Diyalog {index}: ses dosyası paket dışına çıkıyor."
-            )
-
-        if not audio.is_file():
-            fail(
-                f"Diyalog {index}: ses dosyası bulunamadı: {audio}"
-            )
-
-        if audio.stat().st_size == 0:
-            fail(
-                f"Diyalog {index}: ses dosyası boş."
-            )
-
-    return video, timeline_path, timeline
+    return video, timeline
 
 
 def inspect_face_policy(
@@ -294,56 +240,75 @@ def inspect_face_policy(
 ) -> tuple[bool, str]:
 
     """
-    MuseTalk's standard inference pipeline does not
-    provide reliable speaker-to-face identity matching
-    for arbitrary multi-person shots.
-
-    Therefore, this worker requires explicit approval
-    for the target face before processing a dialogue.
+    Otomatik konuşmacı-yüz eşleştirmesi yapılmadığı için
+    yalnızca açıkça onaylanmış tek yüzlü çekimler işlenir.
     """
 
-    face_count = entry.get(
-        "face_count"
-    )
+    face_count = entry.get("face_count")
 
-    target_confirmed = (
-        entry.get("target_face_confirmed")
-        is True
+    confirmed = (
+        entry.get("target_face_confirmed") is True
     )
 
     if face_count is None:
-        return (
-            False,
-            "Yüz sayısı doğrulanmamış.",
-        )
+        return False, "Yüz sayısı doğrulanmamış."
 
     try:
         face_count = int(face_count)
     except (TypeError, ValueError):
-        return (
-            False,
-            "Yüz sayısı geçersiz.",
-        )
+        return False, "Yüz sayısı geçersiz."
 
     if face_count != 1:
-        return (
-            False,
-            "Tek yüzlü çekim değil; otomatik eşleştirme güvenli değil.",
-        )
+        return False, "Çekimde tam olarak bir yüz yok."
 
-    if not target_confirmed:
-        return (
-            False,
-            "Hedef konuşmacının yüzü onaylanmamış.",
-        )
+    if not confirmed:
+        return False, "Hedef konuşmacı yüzü onaylanmamış."
 
-    return (
-        True,
-        "Tek yüz ve konuşmacı eşleştirmesi onaylandı.",
+    return True, "Tek yüz ve hedef konuşmacı onaylı."
+
+
+def create_dialogue_clip(
+    source_video: Path,
+    output_video: Path,
+    start: float,
+    duration: float,
+) -> None:
+
+    if start < 0 or duration <= 0:
+        fail("Video kesme zamanları geçersiz.")
+
+    output_video.parent.mkdir(
+        parents=True,
+        exist_ok=True,
     )
+
+    run([
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", str(source_video),
+        "-ss", f"{start:.4f}",
+        "-t", f"{duration:.4f}",
+        "-an",
+        "-vf", f"fps={FPS}",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        str(output_video),
+    ])
+
+    if not output_video.is_file():
+        fail("Diyalog video klibi oluşturulamadı.")
+
+    if output_video.stat().st_size == 0:
+        fail("Oluşturulan video klibi boş.")
 
 
 def yaml_quote(value: str) -> str:
+
     return json.dumps(
         value,
         ensure_ascii=False,
@@ -359,9 +324,7 @@ def write_inference_config(
 
     for index, task in enumerate(tasks):
 
-        lines.append(
-            f"task_{index}:"
-        )
+        lines.append(f"task_{index}:")
 
         lines.append(
             "  video_path: "
@@ -373,11 +336,10 @@ def write_inference_config(
             + yaml_quote(task["audio_path"])
         )
 
-        if task.get("bbox_shift") is not None:
-            lines.append(
-                "  bbox_shift: "
-                + str(int(task["bbox_shift"]))
-            )
+        lines.append(
+            "  result_name: "
+            + yaml_quote(task["result_name"])
+        )
 
     output_path.parent.mkdir(
         parents=True,
@@ -391,47 +353,40 @@ def write_inference_config(
 
 
 def run_inference(
-    project_root: Path,
-    config_path: Path,
+    root: Path,
+    config: Path,
     result_dir: Path,
 ) -> None:
 
-    inference_script = (
-        project_root / "scripts" / "inference.py"
-    )
+    inference_script = root / "scripts" / "inference.py"
 
     if not inference_script.is_file():
-        fail(
-            "MuseTalk scripts/inference.py bulunamadı."
-        )
+        fail("MuseTalk inference.py bulunamadı.")
 
     command = [
         sys.executable,
         "-m",
         "scripts.inference",
         "--inference_config",
-        str(config_path),
+        str(config.resolve()),
         "--result_dir",
-        str(result_dir),
+        str(result_dir.resolve()),
         "--unet_model_path",
         str(
-            project_root
-            / "models/musetalkV15/unet.pth"
+            root / "models/musetalkV15/unet.pth"
         ),
         "--unet_config",
         str(
-            project_root
-            / "models/musetalkV15/musetalk.json"
+            root / "models/musetalkV15/musetalk.json"
         ),
+        "--whisper_dir",
+        str(root / "models/whisper"),
         "--version",
         "v15",
         "--use_float16",
     ]
 
-    run(
-        command,
-        cwd=project_root,
-    )
+    run(command, cwd=root)
 
 
 def worker(
@@ -443,16 +398,18 @@ def worker(
 
     started = time.time()
 
-    check_binary("ffmpeg")
-    check_binary("ffprobe")
+    require_binary("ffmpeg")
+    require_binary("ffprobe")
 
     gpu = check_gpu()
 
-    video, timeline_path, timeline = (
-        validate_package(package)
-    )
+    video, timeline = validate_package(package)
+
+    project_root = project_root.resolve()
 
     models = check_models(project_root)
+
+    package = package.resolve()
 
     dialogue = timeline["dialogue"]
 
@@ -461,16 +418,19 @@ def worker(
 
     for index, entry in enumerate(dialogue):
 
-        allowed, reason = inspect_face_policy(
-            entry
-        )
+        if not isinstance(entry, dict):
+            skipped.append({
+                "dialogue_index": index,
+                "reason": "Diyalog kaydı geçersiz.",
+            })
+            continue
+
+        allowed, reason = inspect_face_policy(entry)
 
         if not allowed:
             skipped.append({
                 "dialogue_index": index,
-                "speaker_id": entry.get(
-                    "speaker_id"
-                ),
+                "speaker_id": entry.get("speaker_id"),
                 "reason": reason,
             })
             continue
@@ -478,24 +438,24 @@ def worker(
         if not allow_approved_faces:
             skipped.append({
                 "dialogue_index": index,
-                "speaker_id": entry.get(
-                    "speaker_id"
-                ),
-                "reason": (
-                    "İşleme izni verilmedi."
-                ),
+                "speaker_id": entry.get("speaker_id"),
+                "reason": "Onaylı yüz işleme izni verilmedi.",
             })
             continue
 
-        accepted.append(
-            (index, entry)
-        )
+        accepted.append((index, entry))
 
     if not accepted:
         fail(
-            "Güvenli şekilde işlenebilecek diyalog yok. "
-            "Her kayıt için face_count=1 ve "
-            "target_face_confirmed=true gereklidir."
+            "İşlenebilecek onaylı diyalog bulunamadı. "
+            "Güvenlik kontrolü nedeniyle hiçbir yüz "
+            "otomatik olarak seçilmeyecek."
+        )
+
+    if output_dir.exists():
+        fail(
+            "Çıktı klasörü zaten mevcut: "
+            + str(output_dir)
         )
 
     output_dir.mkdir(
@@ -503,108 +463,181 @@ def worker(
         exist_ok=False,
     )
 
-    task_dir = output_dir / "tasks"
-    task_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    clip_dir = output_dir / "dialogue_clips"
+    clip_dir.mkdir(parents=True)
 
     tasks = []
+    task_records = []
 
     for index, entry in accepted:
 
-        audio = (
-            package / str(entry["audio_file"])
+        speaker_id = str(entry["speaker_id"])
+
+        start = float(entry["film_start_seconds"])
+        end = float(entry["film_end_seconds"])
+
+        audio_relative = Path(
+            str(entry["audio_file"])
+        )
+
+        audio_path = (
+            package / audio_relative
         ).resolve()
 
+        try:
+            audio_path.relative_to(package)
+        except ValueError:
+            fail(
+                f"Diyalog {index}: ses dosyası paket dışına çıkıyor."
+            )
+
+        if not audio_path.is_file():
+            fail(
+                f"Diyalog {index}: ses dosyası bulunamadı."
+            )
+
+        audio_duration = probe_duration(audio_path)
+
+        timeline_duration = end - start
+
+        if abs(audio_duration - timeline_duration) > 1.0:
+            fail(
+                f"Diyalog {index}: ses süresi ile "
+                "zaman çizelgesi arasında 1 saniyeden "
+                "fazla fark var. Otomatik kırpma yapılmadı. "
+                f"Ses: {audio_duration:.2f}s, "
+                f"zaman aralığı: {timeline_duration:.2f}s"
+            )
+
+        clip_name = f"dialogue_{index:04d}.mp4"
+
+        clip_path = clip_dir / clip_name
+
+        create_dialogue_clip(
+            source_video=video,
+            output_video=clip_path,
+            start=start,
+            duration=audio_duration,
+        )
+
+        clip_duration = probe_duration(clip_path)
+
+        if abs(clip_duration - audio_duration) > 1.0:
+            fail(
+                f"Diyalog {index}: oluşturulan klibin "
+                "süresi ses ile uyuşmuyor."
+            )
+
+        result_name = (
+            f"dialogue_{index:04d}_synced.mp4"
+        )
+
         task = {
-            "original_dialogue_index": index,
-            "speaker_id": str(
-                entry["speaker_id"]
-            ),
-            "video_path": str(
-                video.resolve()
-            ),
-            "audio_path": str(
-                audio
-            ),
-            "bbox_shift": entry.get(
-                "bbox_shift"
-            ),
-            "film_start_seconds": float(
-                entry["film_start_seconds"]
-            ),
-            "film_end_seconds": float(
-                entry["film_end_seconds"]
-            ),
-            "text": str(
-                entry.get("text", "")
-            ),
+            "video_path": str(clip_path.resolve()),
+            "audio_path": str(audio_path.resolve()),
+            "result_name": result_name,
         }
 
         tasks.append(task)
 
-    config_path = (
-        output_dir / "inference.yaml"
-    )
+        task_records.append({
+            "dialogue_index": index,
+            "speaker_id": speaker_id,
+            "text": str(entry.get("text", "")),
+            "film_start_seconds": start,
+            "film_end_seconds": end,
+            "audio_duration_seconds": round(
+                audio_duration, 4
+            ),
+            "input_clip": str(clip_path),
+            "expected_output": result_name,
+        })
+
+        log(
+            f"Diyalog {index}: kısa video klibi hazır."
+        )
+
+    config_path = output_dir / "inference.yaml"
 
     write_inference_config(
         tasks,
         config_path,
     )
 
-    result_dir = (
-        output_dir / "musetalk_results"
-    )
+    result_dir = output_dir / "musetalk_results"
 
     run_inference(
-        project_root,
-        config_path,
-        result_dir,
+        root=project_root,
+        config=config_path,
+        result_dir=result_dir,
     )
 
     generated = []
 
-    for path in sorted(
-        result_dir.rglob("*.mp4")
-    ):
-        generated.append({
-            "file": str(path),
-            "size_bytes": path.stat().st_size,
-        })
+    for task, record in zip(tasks, task_records):
 
-    if len(generated) != len(tasks):
-        fail(
-            "MuseTalk çıktı sayısı görev sayısıyla eşleşmiyor. "
-            f"Görev: {len(tasks)}, çıktı: {len(generated)}"
+        expected = (
+            result_dir
+            / "v15"
+            / task["result_name"]
         )
 
-    for item in generated:
-        if item["size_bytes"] <= 0:
+        if not expected.is_file():
             fail(
-                "MuseTalk boş video çıktısı oluşturdu."
+                "MuseTalk beklenen çıktı dosyasını üretmedi: "
+                + str(expected)
             )
+
+        if expected.stat().st_size == 0:
+            fail(
+                "MuseTalk boş çıktı oluşturdu: "
+                + str(expected)
+            )
+
+        output_duration = probe_duration(expected)
+
+        if abs(
+            output_duration
+            - record["audio_duration_seconds"]
+        ) > 1.5:
+            fail(
+                "MuseTalk çıktı süresi beklenen ses "
+                "süresiyle uyuşmuyor: "
+                + str(expected)
+            )
+
+        generated.append({
+            "dialogue_index": record["dialogue_index"],
+            "speaker_id": record["speaker_id"],
+            "file": str(expected),
+            "size_bytes": expected.stat().st_size,
+            "duration_seconds": round(
+                output_duration, 4
+            ),
+        })
 
     report = {
         "worker_version": VERSION,
-        "status": "inference_completed",
-        "lip_sync_rendered": True,
+        "status": "dialogue_clips_generated",
+        "lip_sync_rendered": False,
+        "full_film_composited": False,
         "gpu": gpu,
         "models": models,
         "total_dialogue": len(dialogue),
         "accepted_dialogue": len(accepted),
         "skipped_dialogue": len(skipped),
         "skipped": skipped,
+        "dialogue_tasks": task_records,
         "generated_videos": generated,
         "inference_config": str(config_path),
         "elapsed_seconds": round(
-            time.time() - started,
-            2,
+            time.time() - started, 2
         ),
-        "important_note": (
-            "MuseTalk clips have been generated. "
-            "They have not yet been composited into "
-            "the original full-length film."
+        "next_required_step": (
+            "Generated dialogue clips must be composited "
+            "at their original film timestamps. The original "
+            "film audio must be preserved. This worker does "
+            "not create the final full-length film."
         ),
     }
 
@@ -613,9 +646,7 @@ def worker(
         report,
     )
 
-    log(
-        "MuseTalk inference tamamlandı."
-    )
+    log("Diyalog klipleri üretildi ve doğrulandı.")
 
     return report
 
@@ -623,47 +654,38 @@ def worker(
 def main() -> None:
 
     parser = argparse.ArgumentParser(
-        description=(
-            "MuseTalk 1.5 Kaggle GPU Worker"
-        )
+        description="MuseTalk 1.5 Kaggle GPU Worker"
     )
 
     parser.add_argument(
         "--package",
         required=True,
-        help="Hazırlanmış MuseTalk paket klasörü.",
     )
 
     parser.add_argument(
         "--musetalk-root",
         required=True,
-        help="MuseTalk kaynak kodu ve modellerinin bulunduğu klasör.",
     )
 
     parser.add_argument(
         "--output",
         required=True,
-        help="Çıktı klasörü.",
     )
 
     parser.add_argument(
         "--allow-approved-faces",
         action="store_true",
-        help="Yalnızca açıkça onaylanmış tek yüzlü görevleri işle.",
     )
 
     args = parser.parse_args()
 
     try:
+
         report = worker(
             package=Path(args.package),
-            project_root=Path(
-                args.musetalk_root
-            ).resolve(),
+            project_root=Path(args.musetalk_root),
             output_dir=Path(args.output),
-            allow_approved_faces=(
-                args.allow_approved_faces
-            ),
+            allow_approved_faces=args.allow_approved_faces,
         )
 
         print(
@@ -676,9 +698,12 @@ def main() -> None:
         )
 
     except Exception as exc:
-        log(f"HATA: {exc}")
+
+        log("HATA: " + str(exc))
+
         raise SystemExit(1)
 
 
 if __name__ == "__main__":
     main()
+
