@@ -50,6 +50,7 @@ jobs:
       - name: Python dosyalarını derleme kontrolü
         run: |
           python -m compileall -q \
+            film_studio.py \
             film_project.py \
             generate.py \
             camera_director.py \
@@ -62,6 +63,11 @@ jobs:
             wan_audio_postprocess.py \
             production_orchestrator.py \
             tests/test_production_orchestrator.py
+
+      - name: Film stüdyosu komut kontrolü
+        run: |
+          python film_studio.py --help
+          python film_studio.py doctor --help
 
       - name: Ana testleri çalıştır
         run: python -m unittest discover -s tests -v
