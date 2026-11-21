@@ -211,6 +211,50 @@ def build_project(args: argparse.Namespace) -> int:
     from production_orchestrator import ProductionJob
     job = ProductionJob.create(job_dir, project)
 
+    # Mark the two stages that really happened during `prepare` as complete.
+    # Without these checkpoints, the next stage (character_assets) could not
+    # start because ProductionJob correctly enforces stage dependencies.
+    input_dir = job.workspace / "artifacts" / "inputs"
+    input_dir.mkdir(parents=True, exist_ok=True)
+
+    validation_artifact = input_dir / "project_validation.json"
+    script_artifact = input_dir / "script_input.json"
+    character_artifact = input_dir / "character_definitions.json"
+
+    job.start_stage("project_validation")
+    json_write(validation_artifact, {
+        "valid": True,
+        "project_title": project.get("film", {}).get("title", ""),
+        "scene_count": len(project.get("scenes", [])),
+        "character_count": len(project.get("characters", [])),
+        "validated_at": now_iso(),
+        "validator": "film_project.validate_film_project",
+    })
+    job.complete_stage(
+        "project_validation",
+        ["artifacts/inputs/project_validation.json"],
+    )
+
+    job.start_stage("script")
+    json_write(script_artifact, project)
+    json_write(character_artifact, [
+        {
+            "id": character.get("id"),
+            "name": character.get("name"),
+            "description": character.get("description", ""),
+            "personality": character.get("personality", ""),
+            "voice": character.get("voice", ""),
+        }
+        for character in project.get("characters", [])
+    ])
+    job.complete_stage(
+        "script",
+        [
+            "artifacts/inputs/script_input.json",
+            "artifacts/inputs/character_definitions.json",
+        ],
+    )
+
     report = {
         "studio_version": VERSION,
         "status": "prepared",
