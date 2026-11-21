@@ -4,6 +4,12 @@
 The generator reuses the image providers already implemented in generate.py.
 It creates one canonical anchor image per character and writes a manifest
 plus an updated project JSON containing the generated reference paths.
+
+Free-first policy:
+- Never enables or silently selects paid providers.
+- Retries only transient provider/network failures.
+- Never retries or attempts to bypass content-safety rejections.
+- Never marks incomplete or invalid images as successful assets.
 """
 
 from __future__ import annotations
@@ -14,6 +20,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -24,6 +31,10 @@ from project_adapter import legacy_to_pipeline_project
 
 class CharacterAssetError(RuntimeError):
     """Raised when character reference assets cannot be generated safely."""
+
+
+MAX_TRANSIENT_RETRIES = 1
+RETRY_WAIT_SECONDS = 5
 
 
 def _load_project(data: Mapping[str, Any]) -> FilmProject:
@@ -39,9 +50,17 @@ def _load_project(data: Mapping[str, Any]) -> FilmProject:
 
 
 def _safe_component(value: str) -> str:
-    slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", value.strip()).strip("-_")
+    slug = re.sub(
+        r"[^a-zA-Z0-9_-]+",
+        "-",
+        value.strip(),
+    ).strip("-_")
+
     slug = slug[:48] or "character"
-    suffix = hashlib.sha256(value.encode("utf-8")).hexdigest()[:8]
+    suffix = hashlib.sha256(
+        value.encode("utf-8")
+    ).hexdigest()[:8]
+
     return f"{slug}-{suffix}"
 
 
@@ -52,31 +71,41 @@ def _character_prompt(project: FilmProject, character: Any) -> str:
     ]
 
     if character.appearance:
-        details.append(f"Appearance: {character.appearance}.")
+        details.append(
+            f"Appearance: {character.appearance}."
+        )
 
     if character.clothing:
-        details.append(f"Clothing: {character.clothing}.")
+        details.append(
+            f"Clothing: {character.clothing}."
+        )
 
     if character.age is not None:
-        details.append(f"Character age: {character.age}.")
+        details.append(
+            f"Character age: {character.age}."
+        )
 
     if character.continuity_prompt:
         details.append(
-            f"Continuity requirements: {character.continuity_prompt}."
+            f"Continuity requirements: "
+            f"{character.continuity_prompt}."
         )
 
     if project.character_bible:
         details.append(
-            f"Shared character bible: {project.character_bible}."
+            f"Shared character bible: "
+            f"{project.character_bible}."
         )
 
     if project.visual_style:
-        details.append(f"Visual style: {project.visual_style}.")
+        details.append(
+            f"Visual style: {project.visual_style}."
+        )
 
     details.append(
         "Create one original fictional character reference image. "
-        "Show one person only, full body, standing in a neutral relaxed pose, "
-        "with the face clearly visible and unobstructed. "
+        "Show one person only, full body, standing in a neutral relaxed "
+        "pose, with the face clearly visible and unobstructed. "
         "Keep the character centered and fully inside the frame. "
         "Use a simple neutral studio background and even professional "
         "lighting. Preserve the described facial features, hairstyle, "
@@ -107,11 +136,15 @@ def _detect_image_extension(path: Path) -> str:
         return ".webp"
 
     raise CharacterAssetError(
-        f"Generated file is not a supported JPEG, PNG or WebP image: {path}"
+        "Generated file is not a supported JPEG, PNG or WebP image: "
+        f"{path}"
     )
 
 
-def _validate_image(path: Path, minimum_bytes: int = 5000) -> str:
+def _validate_image(
+    path: Path,
+    minimum_bytes: int = 5000,
+) -> str:
     if not path.is_file():
         raise CharacterAssetError(
             f"Character image was not created: {path}"
@@ -131,7 +164,10 @@ def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
 
     with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+        for chunk in iter(
+            lambda: file.read(1024 * 1024),
+            b"",
+        ):
             digest.update(chunk)
 
     return digest.hexdigest()
@@ -151,12 +187,14 @@ def _atomic_write_json(path: Path, value: Any) -> None:
             delete=False,
         ) as file:
             temporary_path = Path(file.name)
+
             json.dump(
                 value,
                 file,
                 ensure_ascii=False,
                 indent=2,
             )
+
             file.write("\n")
             file.flush()
             os.fsync(file.fileno())
@@ -166,6 +204,104 @@ def _atomic_write_json(path: Path, value: Any) -> None:
     finally:
         if temporary_path and temporary_path.exists():
             temporary_path.unlink()
+
+
+def _is_transient_provider_error(error: Exception) -> bool:
+    """Return True only for errors that may succeed on a later attempt.
+
+    Content moderation, authentication, invalid requests and other HTTP 4xx
+    errors are deliberately not retried.
+    """
+    message = str(error).lower()
+
+    permanent_markers = (
+        "8007",
+        "nsfw",
+        "moderation",
+        "content safety",
+        "safety filter",
+        "content filter",
+        "http 400",
+        "http 401",
+        "http 403",
+        "http 404",
+        "http 422",
+    )
+
+    if any(marker in message for marker in permanent_markers):
+        return False
+
+    transient_markers = (
+        "http 408",
+        "http 429",
+        "http 500",
+        "http 502",
+        "http 503",
+        "http 504",
+        "timed out",
+        "timeout",
+        "connection error",
+        "connection reset",
+        "temporarily unavailable",
+        "temporary failure",
+        "rate limit",
+        "server error",
+    )
+
+    return any(
+        marker in message
+        for marker in transient_markers
+    )
+
+
+def _generate_image_safely(
+    prompt: str,
+    output_path: Path,
+    engines: Sequence[str],
+) -> tuple[str, int]:
+    """Generate an image with one retry for transient provider failures."""
+    attempts = MAX_TRANSIENT_RETRIES + 1
+    last_error: Exception | None = None
+
+    for attempt in range(1, attempts + 1):
+        output_path.unlink(missing_ok=True)
+
+        try:
+            engine_used = image_pipeline.generate_image(
+                prompt,
+                output_path,
+                list(engines),
+            )
+
+            if not output_path.is_file():
+                raise CharacterAssetError(
+                    "Image provider returned without creating a file."
+                )
+
+            return engine_used, attempt
+
+        except Exception as exc:
+            last_error = exc
+            output_path.unlink(missing_ok=True)
+
+            if (
+                attempt >= attempts
+                or not _is_transient_provider_error(exc)
+            ):
+                break
+
+            print(
+                "Temporary image provider failure. "
+                f"Retrying once in {RETRY_WAIT_SECONDS} seconds: {exc}",
+                flush=True,
+            )
+
+            time.sleep(RETRY_WAIT_SECONDS)
+
+    raise CharacterAssetError(
+        "Image generation failed after "
+        f"{attempt} attempt(s): {last_error}"
+    ) from last_error
 
 
 def generate_character_assets(
@@ -195,22 +331,39 @@ def generate_character_assets(
             "No image generation engine is available."
         )
 
+    allowed_engines = {"cloudflare", "fal"}
+    unknown_engines = set(selected_engines) - allowed_engines
+
+    if unknown_engines:
+        raise CharacterAssetError(
+            "Unsupported image engine(s): "
+            + ", ".join(sorted(unknown_engines))
+        )
+
+    # Do not silently add FAL or any other paid provider.
+    # The caller must explicitly configure the provider it wants to use.
     root = Path(output_dir).resolve()
     root.mkdir(parents=True, exist_ok=True)
 
     asset_records: list[dict[str, Any]] = []
     updated_project = project.to_dict()
 
-    for index, character in enumerate(project.characters, start=1):
+    for index, character in enumerate(
+        project.characters,
+        start=1,
+    ):
         character_dir = root / _safe_component(character.id)
         character_dir.mkdir(parents=True, exist_ok=True)
 
         temporary_image = character_dir / "anchor.generated"
 
         try:
-            prompt = _character_prompt(project, character)
+            prompt = _character_prompt(
+                project,
+                character,
+            )
 
-            engine_used = image_pipeline.generate_image(
+            engine_used, attempts_used = _generate_image_safely(
                 prompt,
                 temporary_image,
                 selected_engines,
@@ -222,9 +375,15 @@ def generate_character_assets(
             )
 
             final_image = character_dir / f"anchor{extension}"
-            os.replace(temporary_image, final_image)
 
-            relative_path = final_image.relative_to(root).as_posix()
+            os.replace(
+                temporary_image,
+                final_image,
+            )
+
+            relative_path = final_image.relative_to(
+                root
+            ).as_posix()
 
             asset_records.append({
                 "character_id": character.id,
@@ -232,17 +391,24 @@ def generate_character_assets(
                 "asset_type": "canonical_character_anchor",
                 "path": relative_path,
                 "engine": engine_used,
+                "attempts": attempts_used,
                 "bytes": final_image.stat().st_size,
                 "sha256": _sha256(final_image),
                 "validated": True,
             })
 
-            updated_character = updated_project["characters"][index - 1]
+            updated_character = updated_project[
+                "characters"
+            ][index - 1]
+
             updated_character["reference_image"] = relative_path
-            updated_character["reference_images"] = [relative_path]
+            updated_character["reference_images"] = [
+                relative_path
+            ]
 
         except Exception as exc:
             temporary_image.unlink(missing_ok=True)
+
             raise CharacterAssetError(
                 f"Reference generation failed for character "
                 f"'{character.name}' ({character.id}): {exc}"
@@ -255,7 +421,10 @@ def generate_character_assets(
         "asset_count": len(asset_records),
         "all_assets_validated": (
             len(asset_records) == len(project.characters)
-            and all(item["validated"] for item in asset_records)
+            and all(
+                item["validated"]
+                for item in asset_records
+            )
         ),
         "assets": asset_records,
     }
@@ -265,7 +434,11 @@ def generate_character_assets(
             "Character asset validation did not complete."
         )
 
-    _atomic_write_json(root / "character_assets.json", manifest)
+    _atomic_write_json(
+        root / "character_assets.json",
+        manifest,
+    )
+
     _atomic_write_json(
         root / "project_with_character_assets.json",
         updated_project,
@@ -278,12 +451,23 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate persistent character reference images."
     )
-    parser.add_argument("--project-json", required=True)
-    parser.add_argument("--output-dir", required=True)
+
+    parser.add_argument(
+        "--project-json",
+        required=True,
+    )
+
+    parser.add_argument(
+        "--output-dir",
+        required=True,
+    )
+
     args = parser.parse_args()
 
     project_data = json.loads(
-        Path(args.project_json).read_text(encoding="utf-8")
+        Path(args.project_json).read_text(
+            encoding="utf-8"
+        )
     )
 
     manifest = generate_character_assets(
@@ -291,14 +475,30 @@ def main() -> None:
         args.output_dir,
     )
 
-    print("Character reference generation completed.")
-    print("Project:", manifest["project_title"])
-    print("Validated character assets:", manifest["asset_count"])
+    print(
+        "Character reference generation completed.",
+        flush=True,
+    )
+
+    print(
+        "Project:",
+        manifest["project_title"],
+        flush=True,
+    )
+
+    print(
+        "Validated character assets:",
+        manifest["asset_count"],
+        flush=True,
+    )
+
     print(
         "Manifest:",
         Path(args.output_dir) / "character_assets.json",
+        flush=True,
     )
 
 
 if __name__ == "__main__":
     main()
+
