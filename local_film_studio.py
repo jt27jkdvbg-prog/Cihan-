@@ -677,9 +677,57 @@ def _generate_project_in_batches(
     return project
 
 
+def _install_project_compatibility():
+    """
+    Convert the legacy film JSON into the canonical pipeline schema
+    before ProductionJob validates and stores the project.
+    """
+    import production_orchestrator
+    from project_adapter import legacy_to_pipeline_project
+
+    original_create = (
+        production_orchestrator.ProductionJob.create.__func__
+    )
+
+    def compatible_create(cls, workspace, project_data):
+        if (
+            isinstance(project_data, dict)
+            and isinstance(project_data.get("film"), dict)
+            and isinstance(project_data.get("characters"), list)
+            and isinstance(project_data.get("scenes"), list)
+        ):
+            print(
+                "[LOCAL-QWEN] Eski proje biçimi üretim şemasına "
+                "dönüştürülüyor.",
+                flush=True,
+            )
+
+            project_data = legacy_to_pipeline_project(
+                project_data
+            ).to_dict()
+
+            print(
+                "[LOCAL-QWEN] Proje uyumluluk dönüşümü tamamlandı.",
+                flush=True,
+            )
+
+        return original_create(
+            cls,
+            workspace,
+            project_data,
+        )
+
+    production_orchestrator.ProductionJob.create = classmethod(
+        compatible_create
+    )
+
+
 def main() -> int:
     import topic_project_generator as generator
     import film_studio
+
+    # Üretim takip sistemine gönderilen eski proje biçimini dönüştür.
+    _install_project_compatibility()
 
     generator.PROVIDERS["local_qwen"] = local_qwen_generate
     generator.provider_order = lambda: ["local_qwen"]
