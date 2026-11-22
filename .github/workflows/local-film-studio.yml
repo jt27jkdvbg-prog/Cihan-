@@ -1,0 +1,107 @@
+
+name: Yerel Yapay Zekâ ile Film Projesi
+
+on:
+  workflow_dispatch:
+    inputs:
+      konu:
+        description: Film konusu
+        required: true
+        type: string
+      sure:
+        description: Hedef süre (saniye, 15-180)
+        required: true
+        default: "60"
+        type: string
+      tarz:
+        description: Görsel tarz
+        required: true
+        default: cinematic realistic
+        type: string
+      dil:
+        description: Film dili
+        required: true
+        default: Turkish
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  generate-project:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Depoyu indir
+        uses: actions/checkout@v4
+
+      - name: Python kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Sistem araçlarını kur
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake
+
+      - name: Proje bağımlılıklarını kur
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: CPU yerel model çalışma zamanını kur
+        run: |
+          CMAKE_ARGS="-DGGML_NATIVE=OFF" pip install --prefer-binary \
+            llama-cpp-python==0.3.16 \
+            --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+
+      - name: Qwen3-4B modelini indir
+        env:
+          MODEL_URL: https://huggingface.co/ggml-org/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf
+        run: |
+          mkdir -p .models
+          curl --location --fail --retry 4 --retry-delay 3 \
+            "$MODEL_URL" -o .models/Qwen3-4B-Q4_K_M.gguf
+          test -s .models/Qwen3-4B-Q4_K_M.gguf
+          ls -lh .models/Qwen3-4B-Q4_K_M.gguf
+
+      - name: Yerel modelle film projesini oluştur ve doğrula
+        env:
+          LOCAL_QWEN_MODEL_PATH: .models/Qwen3-4B-Q4_K_M.gguf
+          LOCAL_QWEN_CONTEXT: "8192"
+          LOCAL_QWEN_MAX_TOKENS: "12000"
+          VIDEO_LANGUAGE: ${{ inputs.dil }}
+          TARGET_SECONDS: ${{ inputs.sure }}
+          FILM_TOPIC: ${{ inputs.konu }}
+          FILM_STYLE: ${{ inputs.tarz }}
+          FILM_LANGUAGE: ${{ inputs.dil }}
+          FILM_DURATION: ${{ inputs.sure }}
+          LLM_PROVIDER_ORDER: local_qwen
+        run: |
+          python local_film_studio.py prepare \
+            --topic "$FILM_TOPIC" \
+            --style "$FILM_STYLE" \
+            --language "$FILM_LANGUAGE" \
+            --duration "$FILM_DURATION" \
+            --output .work/film_studio/project.json \
+            --cost-report .work/film_studio/reports/cost_report.json \
+            --status .work/film_studio/reports/studio_status.json
+
+      - name: Sonuçları doğrula
+        run: |
+          python film_studio.py validate --project .work/film_studio/project.json
+          python -m py_compile local_film_studio.py
+
+      - name: Film projesi çıktılarını yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: film-studio-project-${{ github.run_number }}
+          path: |
+            .work/film_studio/project.json
+            .work/film_studio/reports/cost_report.json
+            .work/film_studio/reports/studio_status.json
+          if-no-files-found: error
+          retention-days: 14
