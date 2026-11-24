@@ -65,6 +65,13 @@ def _safe_component(value: str) -> str:
 
 
 def _character_prompt(project: FilmProject, character: Any) -> str:
+    """Build a visual-only, neutral character reference prompt.
+
+    Story-wide continuity text and character-bible prose are deliberately
+    excluded. They are not necessary to describe a reference image and may
+    contain unrelated terms that cause false-positive moderation blocks.
+    Character continuity is maintained by reusing the validated anchor.
+    """
     details = [
         f"Character name: {character.name}.",
         f"Visual identity: {character.visual_description}.",
@@ -80,38 +87,23 @@ def _character_prompt(project: FilmProject, character: Any) -> str:
             f"Clothing: {character.clothing}."
         )
 
-    if character.age is not None:
-        details.append(
-            f"Character age: {character.age}."
-        )
-
-    if character.continuity_prompt:
-        details.append(
-            f"Continuity requirements: "
-            f"{character.continuity_prompt}."
-        )
-
-    if project.character_bible:
-        details.append(
-            f"Shared character bible: "
-            f"{project.character_bible}."
-        )
-
     if project.visual_style:
         details.append(
             f"Visual style: {project.visual_style}."
         )
 
     details.append(
-        "Create one original fictional character reference image. "
-        "Show one person only, full body, standing in a neutral relaxed "
-        "pose, with the face clearly visible and unobstructed. "
-        "Keep the character centered and fully inside the frame. "
-        "Use a simple neutral studio background and even professional "
-        "lighting. Preserve the described facial features, hairstyle, "
-        "body proportions and clothing. Realistic anatomy, natural hands, "
-        "clear silhouette, high detail. No extra people, no collage, "
-        "no split screen, no labels, no captions, no logos, no watermark."
+        "Create a neutral, non-sexualized reference illustration "
+        "of one fictional character. The character is fully clothed "
+        "in the described everyday outfit. Show the complete figure "
+        "standing in a relaxed neutral pose, with the face clearly "
+        "visible. Center the subject and keep the entire figure "
+        "inside the frame. Use a plain neutral studio background "
+        "and soft even lighting. Preserve only the supplied visible "
+        "facial features, hairstyle and clothing. Natural anatomy "
+        "and hands, clean silhouette, high-quality character design. "
+        "No suggestive pose, no nudity, no extra people, no collage, "
+        "no split screen, no text, no labels, no logos, no watermark."
     )
 
     return " ".join(details)
@@ -501,4 +493,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
 
