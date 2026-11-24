@@ -1,6 +1,34 @@
 name: Wan Multi-Scene Film Generator
 
 on:
+  workflow_call:
+    inputs:
+      project_json:
+        description: "Otomatik oluşturulan standart film projesi"
+        required: true
+        type: string
+      run_mode:
+        required: false
+        type: string
+        default: production
+      gemini_tts_free_quota_confirmed:
+        required: false
+        type: boolean
+        default: false
+      konu:
+        required: false
+        type: string
+      prompt:
+        required: false
+        type: string
+      scenes_json:
+        required: false
+        type: string
+      stil:
+        required: false
+        type: string
+        default: cinematic realistic
+
   workflow_dispatch:
     inputs:
       project_json:
