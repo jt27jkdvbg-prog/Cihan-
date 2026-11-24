@@ -1,4 +1,3 @@
-
 import json
 import tempfile
 import unittest
@@ -123,8 +122,6 @@ class CharacterAssetGeneratorTests(unittest.TestCase):
     def test_empty_character_list_is_rejected(self):
         project = make_project()
         project["characters"] = []
-
-        # The scene must not reference a character that no longer exists.
         project["scenes"][0]["character_ids"] = []
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -172,7 +169,7 @@ class CharacterAssetGeneratorTests(unittest.TestCase):
                 (Path(temporary) / "character_assets.json").exists()
             )
 
-    def test_prompt_contains_identity_and_continuity_rules(self):
+    def test_prompt_contains_visual_identity_and_safe_reference_rules(self):
         prompts = []
 
         def fake_capture(prompt, path, engines):
@@ -194,9 +191,20 @@ class CharacterAssetGeneratorTests(unittest.TestCase):
                 )
 
         self.assertEqual(len(prompts), 1)
-        self.assertIn("Main Hero", prompts[0])
-        self.assertIn("Never change hairstyle", prompts[0])
-        self.assertIn("one person only", prompts[0])
+
+        prompt = prompts[0]
+
+        self.assertIn("Main Hero", prompt)
+        self.assertIn("short dark hair", prompt)
+        self.assertIn("Dark blue jacket", prompt)
+        self.assertIn("one fictional character", prompt)
+        self.assertIn("fully clothed", prompt)
+        self.assertIn("neutral pose", prompt)
+
+        # Story-wide text is intentionally excluded from image prompts.
+        self.assertNotIn("Never change hairstyle", prompt)
+        self.assertNotIn("Shared character bible", prompt)
+        self.assertNotIn("Keep the same face and clothing", prompt)
 
 
 if __name__ == "__main__":
