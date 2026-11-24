@@ -1,0 +1,129 @@
+
+name: Film MP4 Otomatik Kalite Kontrolü
+
+on:
+  workflow_run:
+    workflows:
+      - "Cihan Film Studio - Tek Giriş"
+    types:
+      - completed
+    branches:
+      - main
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  validate-final-film:
+    name: Final MP4 kalite kontrolü
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Üretimde kullanılan kaynak kodu indir
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Python kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: FFmpeg ve FFprobe kur
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          ffprobe -version | head -n 1
+
+      - name: Film üretim artifact dosyasını indir
+        uses: actions/download-artifact@v4
+        with:
+          name: cihan-multi-scene-film
+          path: output
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Final MP4 dosyasını bul ve doğrula
+        id: quality
+        run: |
+          set -euo pipefail
+
+          echo "İndirilen film dosyaları:"
+          find output -type f -print
+
+          VIDEO=$(find output -type f -name "final-film.mp4" | head -n 1)
+
+          if [ -z "$VIDEO" ]; then
+            echo "Final MP4 bulunamadı."
+            exit 1
+          fi
+
+          echo "Kontrol edilecek dosya: $VIDEO"
+
+          VIDEO_PATH="$VIDEO" python - <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          from quality_gate import validate_final_video
+
+          video_path = Path(os.environ["VIDEO_PATH"])
+          report_path = Path("output/quality_gate_report.json")
+          report_path.parent.mkdir(parents=True, exist_ok=True)
+
+          try:
+              report = validate_final_video(
+                  video_path,
+                  require_audio=True,
+                  min_width=640,
+                  min_height=360,
+                  min_fps=10.0,
+              )
+
+              report["checked_by"] = "film-quality-gate"
+              report["source_video"] = str(video_path)
+
+              report_path.write_text(
+                  json.dumps(report, ensure_ascii=False, indent=2),
+                  encoding="utf-8",
+              )
+
+              print("FINAL_VIDEO_QUALITY=PASSED")
+              print(json.dumps(report, ensure_ascii=False, indent=2))
+
+          except Exception as exc:
+              failure_report = {
+                  "status": "failed",
+                  "valid": False,
+                  "source_video": str(video_path),
+                  "error": str(exc),
+              }
+
+              report_path.write_text(
+                  json.dumps(
+                      failure_report,
+                      ensure_ascii=False,
+                      indent=2,
+                  ),
+                  encoding="utf-8",
+              )
+
+              print("FINAL_VIDEO_QUALITY=FAILED")
+              print(str(exc), file=sys.stderr)
+              sys.exit(1)
+          PY
+
+      - name: Kalite kontrol raporunu sakla
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cihan-film-quality-report
+          path: output/quality_gate_report.json
+          if-no-files-found: warn
+          retention-days: 14
