@@ -1,25 +1,73 @@
-
-name: Wan VACE - Kaggle GPU Video
+name: Wan Multi-Scene Film Generator
 
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
-      konu:
-        description: "Videonun konusu"
+      project_json:
+        description: "Otomatik oluşturulan standart film projesi"
         required: true
         type: string
+      run_mode:
+        required: false
+        type: string
+        default: production
+      gemini_tts_free_quota_confirmed:
+        required: false
+        type: boolean
+        default: false
+      konu:
+        required: false
+        type: string
       prompt:
-        description: "Sahnenin ayrıntılı açıklaması"
+        required: false
+        type: string
+      scenes_json:
+        required: false
+        type: string
+      stil:
+        required: false
+        type: string
+        default: cinematic realistic
+
+  workflow_dispatch:
+    inputs:
+      project_json:
+        description: "Standart film projesi JSON (öncelikli yöntem)"
+        required: false
+        type: string
+      run_mode:
+        description: "Çalıştırma modu"
         required: true
+        default: "preflight"
+        type: choice
+        options:
+          - preflight
+          - production
+      gemini_tts_free_quota_confirmed:
+        description: "Gemini hesabındaki ücretsiz TTS kotasını kontrol ettim"
+        required: true
+        default: false
+        type: boolean
+      konu:
+        description: "Filmin konusu (eski yöntem)"
+        required: false
+        type: string
+      prompt:
+        description: "Ana hikaye ve karakter açıklaması (eski yöntem)"
+        required: false
+        type: string
+      scenes_json:
+        description: "Sahne açıklamalarının JSON listesi (eski yöntem)"
+        required: false
         type: string
       stil:
         description: "Görsel tarz"
-        required: true
+        required: false
         default: "cinematic realistic"
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   generate:
@@ -37,40 +85,272 @@ jobs:
 
       - name: Kaggle CLI kur
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
-          pip install kaggle six
+          pip install --upgrade kaggle six
 
-      - name: Kaggle kimlik doğrulama
+      - name: Kaggle kimlik doğrulama ve bağlantı testi
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
         run: |
+          set -euo pipefail
+
+          if [ -z "$KAGGLE_API_TOKEN" ]; then
+            echo "KAGGLE_API_TOKEN eksik."
+            exit 1
+          fi
+
+          if [ -z "$KAGGLE_USERNAME" ]; then
+            echo "KAGGLE_USERNAME eksik."
+            exit 1
+          fi
+
           mkdir -p ~/.kaggle
           printf '%s' "$KAGGLE_API_TOKEN" > ~/.kaggle/access_token
           chmod 600 ~/.kaggle/access_token
+
+          echo "Kaggle API bağlantısı test ediliyor..."
           kaggle kernels list --mine
 
-      - name: Kaggle görev dosyalarını hazırla
+          echo "KAGGLE_AUTH_CHECK=SUCCESS"
+
+      - name: Film projesini doğrula ve Worker hazırla
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          VIDEO_PROJECT_JSON: ${{ inputs.project_json }}
           VIDEO_TOPIC: ${{ inputs.konu }}
           VIDEO_PROMPT: ${{ inputs.prompt }}
+          VIDEO_SCENES_JSON: ${{ inputs.scenes_json }}
           VIDEO_STYLE: ${{ inputs.stil }}
+          VIDEO_RUN_MODE: ${{ inputs.run_mode }}
         run: |
+          set -euo pipefail
           mkdir -p kaggle-worker
 
           python - <<'PY'
-          import json, os
+          import json
+          import os
+          from pathlib import Path
 
-          owner = os.environ["KAGGLE_USERNAME"].strip().lower()
+          from film_project import validate_film_project
+          from wan_project_input import normalize_wan_project
+
+          run_mode = os.environ.get("VIDEO_RUN_MODE", "preflight").strip()
+          if run_mode not in {"preflight", "production"}:
+              raise ValueError("Geçersiz run_mode: " + run_mode)
+
+          owner = os.environ.get("KAGGLE_USERNAME", "").strip().lower()
+          if run_mode == "production" and not owner:
+              raise ValueError("Production için KAGGLE_USERNAME zorunludur.")
+          if not owner:
+              owner = "preflight"
+
+          raw_project = os.environ.get("VIDEO_PROJECT_JSON", "").strip()
+          topic_input = os.environ.get("VIDEO_TOPIC", "").strip()
+          prompt_input = os.environ.get("VIDEO_PROMPT", "").strip()
+          style_input = os.environ.get("VIDEO_STYLE", "").strip() or "cinematic realistic"
+          raw_scenes = os.environ.get("VIDEO_SCENES_JSON", "").strip()
+
+          if raw_project:
+              print("Standart film projesi bulundu. JSON doğrulanıyor...")
+
+              try:
+                  project = normalize_wan_project(json.loads(raw_project))
+              except json.JSONDecodeError as exc:
+                  raise ValueError(
+                      f"project_json geçerli JSON değil: {exc}"
+                  ) from exc
+
+              report = validate_film_project(project)
+
+              if not report["valid"]:
+                  details = "\n".join(
+                      "- " + error for error in report["errors"]
+                  )
+                  raise ValueError(
+                      "Film projesi doğrulamadan geçemedi:\n" + details
+                  )
+
+              film = project["film"]
+              characters = project["characters"]
+
+              topic = (
+                  str(film.get("topic") or "").strip()
+                  or str(film.get("title") or "").strip()
+              )
+
+              prompt_parts = [
+                  str(film.get("description") or "").strip(),
+                  str(film.get("character_bible") or "").strip(),
+              ]
+
+              prompt = " ".join(part for part in prompt_parts if part).strip()
+
+              if not prompt:
+                  prompt = str(film.get("title") or "Short film").strip()
+
+              style = (
+                  str(film.get("visual_style") or "").strip()
+                  or style_input
+              )
+
+              character_descriptions = []
+
+              for character in characters:
+                  description = (
+                      f"{character['name']}: "
+                      f"{character.get('description', '')}. "
+                      f"Personality: {character.get('personality', '')}."
+                  ).strip()
+
+                  character_descriptions.append(description)
+
+              character_bible = " ".join(character_descriptions)
+
+              scenes = []
+
+              for index, scene in enumerate(project["scenes"], 1):
+                  parts = []
+
+                  if scene.get("visual_subject"):
+                      parts.append(
+                          "Visual subject: " + scene["visual_subject"]
+                      )
+
+                  if scene.get("location"):
+                      parts.append("Location: " + scene["location"])
+
+                  if scene.get("action"):
+                      parts.append("Action: " + scene["action"])
+
+                  if scene.get("props"):
+                      parts.append("Props: " + scene["props"])
+
+                  if scene.get("image_prompt"):
+                      parts.append(
+                          "Visual description: " + scene["image_prompt"]
+                      )
+
+                  if scene.get("motion_prompt"):
+                      parts.append(
+                          "Movement direction: " + scene["motion_prompt"]
+                      )
+
+                  if scene.get("camera"):
+                      parts.append("Camera: " + scene["camera"])
+
+                  if scene.get("narration"):
+                      parts.append(
+                          "Narrative context: " + scene["narration"]
+                      )
+
+                  dialogue_lines = []
+
+                  for turn in scene.get("dialogue_turns", []):
+                      speaker_id = turn.get("speaker", "")
+                      speaker = next(
+                          (
+                              character["name"]
+                              for character in characters
+                              if character["id"] == speaker_id
+                          ),
+                          speaker_id
+                      )
+
+                      dialogue_lines.append(
+                          f"{speaker} says: {turn['text']}"
+                      )
+
+                  if dialogue_lines:
+                      parts.append(
+                          "Dialogue context, not subtitles: "
+                          + " ".join(dialogue_lines)
+                      )
+
+                  if scene.get("sound"):
+                      parts.append(
+                          "Intended sound atmosphere: " + scene["sound"]
+                      )
+
+                  if scene.get("transition"):
+                      parts.append(
+                          "Transition context: " + scene["transition"]
+                      )
+
+                  scene_prompt = ". ".join(
+                      part for part in parts if part
+                  ).strip()
+
+                  if not scene_prompt:
+                      raise ValueError(
+                          f"{index}. sahnenin üretim açıklaması boş."
+                      )
+
+                  scenes.append(scene_prompt)
+
+              print("Standart proje doğrulandı.")
+              print("Film:", film.get("title"))
+              print("Karakter:", len(characters))
+              print("Sahne:", len(scenes))
+              print("Hedef süre:", film.get("target_duration_seconds"), "sn")
+
+          else:
+              print("Eski giriş yöntemi kullanılıyor.")
+
+              if not topic_input or not prompt_input:
+                  raise ValueError(
+                      "project_json kullanmıyorsanız konu ve prompt zorunludur."
+                  )
+
+              topic = topic_input
+              prompt = prompt_input
+              style = style_input
+
+              scenes = json.loads(raw_scenes) if raw_scenes else [prompt]
+
+              if not isinstance(scenes, list) or not scenes:
+                  raise ValueError(
+                      "Sahneler JSON listesi olmalıdır."
+                  )
+
+              if len(scenes) > 15:
+                  raise ValueError(
+                      "En fazla 15 sahne üretilebilir."
+                  )
+
+              if not all(
+                  isinstance(scene, str) and scene.strip()
+                  for scene in scenes
+              ):
+                  raise ValueError(
+                      "Her sahne dolu bir metin olmalıdır."
+                  )
+
+              character_bible = ""
+
+          if not 1 <= len(scenes) <= 15:
+              raise ValueError(
+                  "Sahne sayısı 1 ile 15 arasında olmalıdır."
+              )
+
+          if not topic or not prompt or not style:
+              raise ValueError(
+                  "Konu, ana prompt ve görsel stil boş olamaz."
+              )
+
           request = {
-              "topic": os.environ["VIDEO_TOPIC"],
-              "prompt": os.environ["VIDEO_PROMPT"],
-              "style": os.environ["VIDEO_STYLE"]
+              "topic": topic,
+              "prompt": prompt,
+              "style": style,
+              "character_bible": character_bible,
+              "scenes": scenes,
+              "reference_bundle_required": bool(raw_project)
           }
 
           metadata = {
-              "id": owner + "/cihan-wan-vace-worker",
-              "title": "Cihan Wan VACE Worker",
+              "id": owner + "/cihan-multi-scene-film-worker",
+              "title": "Cihan Multi Scene Film Worker",
               "code_file": "worker.py",
               "language": "python",
               "kernel_type": "script",
@@ -84,27 +364,27 @@ jobs:
               "model_sources": []
           }
 
-          with open("kaggle-worker/kernel-metadata.json", "w") as f:
-              json.dump(metadata, f, indent=2)
+          Path("kaggle-worker/kernel-metadata.json").write_text(
+              json.dumps(metadata, indent=2),
+              encoding="utf-8"
+          )
 
-          with open("kaggle-worker/request.json", "w") as f:
-              json.dump(request, f, ensure_ascii=False, indent=2)
-          PY
-
-          cat > kaggle-worker/worker.py <<'PY'
-          import os
+          worker = r'''
           import sys
           import json
+          import shutil
           import subprocess
           import traceback
+          import time
           from pathlib import Path
 
           WORK = Path("/kaggle/working")
-          OUTPUT = WORK / "output.mp4"
-          REQUEST_FILE = Path(__file__).parent / "request.json"
+          WAN_REPO_COMMIT = "9737cba9c1c3c4d04b33fcad41c111989865d315"
+          REQUEST_JSON = None
+          performance_recorder = None
 
           def run(command, cwd=None, timeout=None):
-              print("\n>>>", " ".join(map(str, command)), flush=True)
+              print("\\n>>>", " ".join(map(str, command)), flush=True)
               subprocess.run(
                   command,
                   cwd=cwd,
@@ -112,63 +392,167 @@ jobs:
                   timeout=timeout
               )
 
-          try:
-              with open(REQUEST_FILE, encoding="utf-8") as f:
-                  request = json.load(f)
+          def main():
+              global performance_recorder
 
+              request = json.loads(REQUEST_JSON)
               topic = request["topic"]
-              prompt = request["prompt"]
               style = request["style"]
+              scenes = request["scenes"]
+              character_bible = request.get("character_bible", "")
 
-              final_prompt = (
-                  f"{prompt}. Subject: {topic}. "
-                  f"Visual style: {style}. "
-                  "Cinematic composition, coherent motion, "
-                  "natural movement, detailed environment."
+              performance_recorder = PerformanceRecorder(
+                  WORK,
+                  project_title=topic,
+                  profile="Wan2.1-VACE-1.3B / NvidiaTeslaT4",
+              )
+
+              output_dir = WORK / "film_output"
+              output_dir.mkdir(parents=True, exist_ok=True)
+
+              verified_bundle = None
+              conditioning_scenes = 0
+              reference_status = {
+                  "status": "not_required",
+                  "images_verified": 0,
+                  "scene_references_verified": 0,
+                  "conditioning_applied": False,
+                  "conditioning_scenes": 0,
+                  "engine": "Wan2.1-VACE-1.3B",
+              }
+
+              if request.get("reference_bundle_required", False):
+                  worker_dir = Path(__file__).resolve().parent
+                  sys.path.insert(0, str(worker_dir))
+
+                  input_root = Path("/kaggle/input")
+                  if not input_root.is_dir():
+                      raise RuntimeError(
+                          "Kaggle input dizini bulunamadı; karakter referans veri seti bağlanmamış."
+                      )
+
+                  manifests = sorted(input_root.rglob("reference_bundle.json"))
+                  if len(manifests) != 1:
+                      raise RuntimeError(
+                          "Tam olarak bir reference_bundle.json bekleniyordu; "
+                          f"bulunan: {len(manifests)}"
+                      )
+
+                  verified_bundle = load_reference_bundle(manifests[0].parent)
+                  validation = verified_bundle["runtime_validation"]
+
+                  if len(verified_bundle.get("scenes", [])) != len(scenes):
+                      raise RuntimeError(
+                          "Referans paketi sahne sayısı film projesiyle eşleşmiyor."
+                      )
+                  if validation.get("images_verified", 0) < 1:
+                      raise RuntimeError(
+                          "VACE için doğrulanmış karakter referans görseli bulunamadı."
+                      )
+
+                  reference_status = {
+                      **validation,
+                      "conditioning_applied": False,
+                      "conditioning_scenes": 0,
+                      "engine": "Wan2.1-VACE-1.3B",
+                      "note": "Referanslar doğrulandı; üretimde VACE koşullandırması uygulanacak.",
+                  }
+
+              (output_dir / "reference_runtime_status.json").write_text(
+                  json.dumps(reference_status, ensure_ascii=False, indent=2),
+                  encoding="utf-8",
+              )
+
+              print(
+                  "Karakter referans doğrulama durumu:",
+                  reference_status["status"],
+                  "| görüntü:",
+                  reference_status["images_verified"],
+                  "| sahne eşleşmesi:",
+                  reference_status["scene_references_verified"],
+                  "| görsel koşullandırma:",
+                  reference_status["conditioning_applied"],
+                  flush=True,
               )
 
               print("1. GPU kontrolü", flush=True)
-              run([sys.executable, "-c",
-                   "import torch; print(torch.cuda.is_available()); "
-                   "print(torch.cuda.device_count()); "
-                   "print(torch.cuda.get_device_name(0))"])
 
-              print("2. Gerekli paketler", flush=True)
               run([
-                  sys.executable, "-m", "pip", "install",
-                  "ftfy==6.3.1", "easydict",
-                  "imageio", "imageio-ffmpeg",
-                  "opencv-python-headless",
-                  "huggingface_hub"
+                  sys.executable, "-c",
+                  "import torch; "
+                  "assert torch.cuda.is_available(), 'CUDA bulunamadı'; "
+                  "print(torch.cuda.get_device_name(0))"
               ])
 
-              print("3. Wan modelini indir", flush=True)
+              print("2. Wan bağımlılıkları kuruluyor", flush=True)
+
+              run([
+                  sys.executable, "-m", "pip", "install",
+                  "ftfy==6.3.1",
+                  "easydict",
+                  "einops",
+                  "timm",
+                  "safetensors",
+                  "diffusers>=0.31.0",
+                  "transformers>=4.49.0",
+                  "tokenizers>=0.20.3",
+                  "accelerate>=1.1.1",
+                  "tqdm",
+                  "numpy>=1.23.5,<2",
+                  "imageio",
+                  "imageio-ffmpeg",
+                  "opencv-python-headless",
+                  "huggingface_hub"
+              ], timeout=3600)
+
+              print("3. FFmpeg kontrolü", flush=True)
+
+              if not shutil.which("ffmpeg"):
+                  run(["apt-get", "update"], timeout=1200)
+                  run(["apt-get", "install", "-y", "ffmpeg"], timeout=1200)
+
+              print("4. Wan modeli indiriliyor", flush=True)
+
               from huggingface_hub import snapshot_download
 
               model_dir = snapshot_download(
-                  repo_id="Wan-AI/Wan2.1-T2V-1.3B"
+                  repo_id="Wan-AI/Wan2.1-VACE-1.3B"
               )
 
-              print("Model klasörü:", model_dir, flush=True)
+              print("Model hazır:", model_dir, flush=True)
 
-              print("4. Wan deposunu indir", flush=True)
+              print("5. Wan deposu hazırlanıyor", flush=True)
+
               repo = WORK / "Wan2.1"
 
               if not repo.exists():
+                  run(["git", "init", str(repo)])
                   run([
-                      "git", "clone",
-                      "https://github.com/Wan-Video/Wan2.1.git",
-                      str(repo)
+                      "git", "-C", str(repo),
+                      "remote", "add", "origin",
+                      "https://github.com/Wan-Video/Wan2.1.git"
                   ])
-            
-              print("4A. T4 uyumluluk düzeltmeleri", flush=True)
+                  run([
+                      "git", "-C", str(repo),
+                      "fetch", "--depth", "1",
+                      "origin", WAN_REPO_COMMIT
+                  ], timeout=1800)
+                  run([
+                      "git", "-C", str(repo),
+                      "checkout", "--detach", "FETCH_HEAD"
+                  ])
+
+              print("6. T4 FP16 uyumluluğu ayarlanıyor", flush=True)
 
               model_file = repo / "wan" / "modules" / "model.py"
               model_source = model_file.read_text(encoding="utf-8")
 
               old_import = "from .attention import flash_attention"
+
               if old_import not in model_source:
-                  raise RuntimeError("Wan attention import satırı bulunamadı.")
+                  raise RuntimeError(
+                      "Attention import satırı bulunamadı."
+                  )
 
               model_source = model_source.replace(
                   old_import,
@@ -177,7 +561,9 @@ jobs:
               )
 
               if "flash_attention(" not in model_source:
-                  raise RuntimeError("Attention çağrıları bulunamadı.")
+                  raise RuntimeError(
+                      "Attention çağrıları bulunamadı."
+                  )
 
               model_source = model_source.replace(
                   "flash_attention(",
@@ -185,26 +571,46 @@ jobs:
               )
 
               if "flash_attention(" in model_source:
-                  raise RuntimeError("Attention dönüşümü tamamlanamadı.")
+                  raise RuntimeError(
+                      "Attention dönüşümü tamamlanamadı."
+                  )
 
-              model_file.write_text(model_source, encoding="utf-8")
+              model_file.write_text(
+                  model_source,
+                  encoding="utf-8"
+              )
 
               attention_file = repo / "wan" / "modules" / "attention.py"
-              attention_source = attention_file.read_text(encoding="utf-8")
+              attention_source = attention_file.read_text(
+                  encoding="utf-8"
+              )
 
               old_dtype = "dtype=torch.bfloat16,"
+
               if old_dtype not in attention_source:
-                  raise RuntimeError("Attention dtype ayarı bulunamadı.")
+                  raise RuntimeError(
+                      "Attention BF16 ayarı bulunamadı."
+                  )
 
               attention_source = attention_source.replace(
                   old_dtype,
-                  "dtype=torch.float16,",
-                  1
+                  "dtype=torch.float16,"
               )
-              attention_file.write_text(attention_source, encoding="utf-8")
+
+              if old_dtype in attention_source:
+                  raise RuntimeError(
+                      "Tüm BF16 ayarları FP16 yapılamadı."
+                  )
+
+              attention_file.write_text(
+                  attention_source,
+                  encoding="utf-8"
+              )
 
               shared_file = repo / "wan" / "configs" / "shared_config.py"
-              shared_source = shared_file.read_text(encoding="utf-8")
+              shared_source = shared_file.read_text(
+                  encoding="utf-8"
+              )
 
               replacements = [
                   (
@@ -219,17 +625,53 @@ jobs:
 
               for old, new in replacements:
                   if old not in shared_source:
-                      raise RuntimeError("Wan FP16 yapılandırma satırı bulunamadı.")
-                  shared_source = shared_source.replace(old, new, 1)
+                      raise RuntimeError(
+                          "FP16 yapılandırma satırı bulunamadı: " + old
+                      )
 
-              shared_file.write_text(shared_source, encoding="utf-8")
+                  shared_source = shared_source.replace(
+                      old,
+                      new,
+                      1
+                  )
 
-              print("5. FP16 SDPA GPU testi", flush=True)
+              shared_file.write_text(
+                  shared_source,
+                  encoding="utf-8"
+              )
+
+              print("6B. T4 VAE bellek yönetimi yamalanıyor", flush=True)
+
+              vace_file = repo / "wan" / "vace.py"
+              vace_source = vace_file.read_text(encoding="utf-8")
+              vace_anchor = "        # vace context encode\n        z0 = self.vace_encode_frames("
+              vace_patch = (
+                  "        # T4 VRAM guard: release DiT weights before VAE encoding.\n"
+                  "        # The model is moved back to CUDA by the sampling loop below.\n"
+                  "        if offload_model:\n"
+                  "            self.model.cpu()\n"
+                  "            import gc\n"
+                  "            gc.collect()\n"
+                  "            torch.cuda.empty_cache()\n"
+                  "\n"
+                  "        # vace context encode\n"
+                  "        z0 = self.vace_encode_frames("
+              )
+
+              if vace_source.count(vace_anchor) != 1:
+                  raise RuntimeError(
+                      "WanVace VAE encode yama noktası beklenen şekilde bulunamadı."
+                  )
+
+              vace_source = vace_source.replace(vace_anchor, vace_patch, 1)
+              compile(vace_source, str(vace_file), "exec")
+              vace_file.write_text(vace_source, encoding="utf-8")
+
+              print("7. FP16 GPU testi", flush=True)
 
               run([
                   sys.executable, "-c",
                   "import torch; "
-                  "assert torch.cuda.is_available(), 'CUDA yok'; "
                   "q=torch.randn((1,2,128,64),device='cuda',dtype=torch.float16); "
                   "o=torch.nn.functional.scaled_dot_product_attention(q,q,q); "
                   "torch.cuda.synchronize(); "
@@ -239,14 +681,19 @@ jobs:
               generator = repo / "generate.py"
 
               if not generator.exists():
-                  raise RuntimeError("Wan generate.py bulunamadı.")
+                  raise RuntimeError(
+                      "Wan generate.py bulunamadı."
+                  )
 
-              print("5. İsteğe bağlı prompt modülünü kontrol et", flush=True)
+              print("8. İsteğe bağlı prompt modülü kontrolü", flush=True)
+
               source = generator.read_text(encoding="utf-8")
+
               old = (
                   "from wan.utils.prompt_extend import "
                   "DashScopePromptExpander, QwenPromptExpander"
               )
+
               replacement = (
                   "try:\n"
                   "    from wan.utils.prompt_extend import "
@@ -258,83 +705,738 @@ jobs:
 
               if old in source:
                   generator.write_text(
-                      source.replace(old, replacement),
+                      source.replace(old, replacement, 1),
                       encoding="utf-8"
                   )
 
-              print("6. T2V video üretimi başlıyor", flush=True)
+              print("9. Çok sahneli video üretimi", flush=True)
 
-              command = [
-                  sys.executable,
-                  str(generator),
-                  "--task", "t2v-1.3B",
-                  "--size", "832*480",
-                  "--frame_num", "17",
-                  "--ckpt_dir", model_dir,
-                  "--offload_model", "True",
-                  "--t5_cpu",
-                  "--prompt", final_prompt,
-                  "--sample_steps", "8",
-                  "--sample_guide_scale", "6",
-                  "--sample_shift", "8",
-                  "--save_file", str(OUTPUT)
-              ]
+              import gc
+              import torch
 
-              run(command, cwd=str(repo), timeout=20000)
+              sys.path.insert(0, str(repo))
+              import wan
+              from wan.configs import WAN_CONFIGS, SIZE_CONFIGS
+              from wan.utils.utils import cache_video
 
-              if not OUTPUT.exists() or OUTPUT.stat().st_size < 10000:
-                  raise RuntimeError("Video oluşmadı veya dosya boş.")
+              cfg = WAN_CONFIGS["vace-1.3B"]
 
-              print("BAŞARILI:", OUTPUT, flush=True)
-              print("Boyut:", OUTPUT.stat().st_size, "byte", flush=True)
+              performance_recorder.capture_gpu(torch)
 
-          except Exception:
+              print(
+                  "Wan modeli bir kez yükleniyor...",
+                  flush=True
+              )
+
+              model_load_started = time.perf_counter()
+
+              pipeline = wan.WanVace(
+                  config=cfg,
+                  checkpoint_dir=model_dir,
+                  device_id=0,
+                  rank=0,
+                  t5_fsdp=False,
+                  dit_fsdp=False,
+                  use_usp=False,
+                  t5_cpu=True,
+              )
+
+              model_load_seconds = time.perf_counter() - model_load_started
+
+              print(
+                  "Wan modeli hazır. Yükleme süresi:",
+                  round(model_load_seconds, 2),
+                  "saniye",
+                  flush=True
+              )
+
+              performance_recorder.capture_gpu(torch)
+
+              generated_clips = []
+
+              for index, scene in enumerate(scenes, start=1):
+                  scene_started = time.perf_counter()
+                  scene_file = output_dir / f"scene_{index:02d}.mp4"
+
+                  scene_reference = (
+                      verified_bundle["scenes"][index - 1]
+                      if verified_bundle is not None else None
+                  )
+                  reference_paths = (
+                      [
+                          item["local_path"]
+                          for item in scene_reference.get("reference_images", [])
+                      ]
+                      if scene_reference is not None else []
+                  )
+                  scene_description = (
+                      scene_reference.get("visual_prompt", "").strip()
+                      if scene_reference is not None else ""
+                  ) or scene
+
+                  final_prompt = (
+                      f"{scene_description}. "
+                      f"Main story brief and creative direction: {request['prompt']}. "
+                      f"Story context: {topic}. "
+                      f"Character continuity reference: {character_bible}. "
+                      f"Visual style: {style}. "
+                      "Preserve supplied reference identity, face, hairstyle, "
+                      "clothing and proportions. Maintain continuity across scenes. "
+                      "Cinematic composition, natural body movement, coherent "
+                      "physical action, detailed environment, professional film lighting."
+                  )
+
+                  print(
+                      f"SAHNE {index}/{len(scenes)} VACE İLE ÜRETİLİYOR "
+                      "(81 kare / yaklaşık 5 saniye)",
+                      flush=True
+                  )
+
+                  source_video, source_mask, source_references = pipeline.prepare_source(
+                      [None],
+                      [None],
+                      [reference_paths or None],
+                      81,
+                      SIZE_CONFIGS["832*480"],
+                      torch.device("cuda:0"),
+                  )
+
+                  video = pipeline.generate(
+                      input_prompt=final_prompt,
+                      input_frames=source_video,
+                      input_masks=source_mask,
+                      input_ref_images=source_references,
+                      size=SIZE_CONFIGS["832*480"],
+                      frame_num=81,
+                      context_scale=1.0,
+                      shift=5.0,
+                      sample_solver="unipc",
+                      sampling_steps=8,
+                      guide_scale=6.0,
+                      seed=-1,
+                      offload_model=True,
+                  )
+
+                  if reference_paths:
+                      conditioning_scenes += 1
+
+                  torch.cuda.synchronize()
+
+                  cache_video(
+                      tensor=video[None],
+                      save_file=str(scene_file),
+                      fps=cfg.sample_fps,
+                      nrow=1,
+                      normalize=True,
+                      value_range=(-1, 1),
+                  )
+
+                  del video
+                  gc.collect()
+                  torch.cuda.empty_cache()
+
+                  if not scene_file.exists():
+                      raise RuntimeError(
+                          f"Sahne {index} video dosyası oluşturmadı."
+                      )
+
+                  if scene_file.stat().st_size < 10000:
+                      raise RuntimeError(
+                          f"Sahne {index} video dosyası geçersiz."
+                      )
+
+                  scene_elapsed = time.perf_counter() - scene_started
+
+                  performance_recorder.record_scene(
+                      scene_index=index,
+                      elapsed_seconds=scene_elapsed,
+                      frame_count=81,
+                      width=832,
+                      height=480,
+                      sampling_steps=8,
+                      seed=-1,
+                  )
+
+                  performance_recorder.capture_gpu(torch)
+
+                  generated_clips.append(scene_file)
+
+                  print(
+                      f"Sahne {index} tamamlandı | "
+                      f"{scene_file.stat().st_size} byte | "
+                      f"{scene_elapsed:.1f} saniye",
+                      flush=True
+                  )
+
+              if verified_bundle is not None:
+                  if conditioning_scenes < 1:
+                      raise RuntimeError(
+                          "Referans paketi bağlı ancak hiçbir sahnede VACE koşullandırması uygulanmadı."
+                      )
+                  reference_status.update(
+                      conditioning_applied=True,
+                      conditioning_scenes=conditioning_scenes,
+                      note="WanVace.generate doğrulanmış sahne referanslarıyla çağrıldı.",
+                  )
+                  (output_dir / "reference_runtime_status.json").write_text(
+                      json.dumps(reference_status, ensure_ascii=False, indent=2),
+                      encoding="utf-8",
+                  )
+
+              print("10. Videolar birleştiriliyor", flush=True)
+
+              concat_file = output_dir / "concat_list.txt"
+
+              concat_file.write_text(
+                  "".join(
+                      f"file '{clip.as_posix()}'\n"
+                      for clip in generated_clips
+                  ),
+                  encoding="utf-8"
+              )
+
+              final_video = WORK / "film.mp4"
+
+              concat_started = time.perf_counter()
+
+              run([
+                  "ffmpeg",
+                  "-y",
+                  "-f", "concat",
+                  "-safe", "0",
+                  "-i", str(concat_file),
+                  "-c:v", "libx264",
+                  "-preset", "veryfast",
+                  "-crf", "20",
+                  "-pix_fmt", "yuv420p",
+                  "-r", "16",
+                  "-movflags", "+faststart",
+                  "-an",
+                  str(final_video)
+              ])
+
+              concat_elapsed = time.perf_counter() - concat_started
+
+              if not final_video.exists():
+                  raise RuntimeError(
+                      "Birleştirilmiş film bulunamadı."
+                  )
+
+              if final_video.stat().st_size < 10000:
+                  raise RuntimeError(
+                      "Final film dosyası geçersiz."
+                  )
+
+              performance_recorder.capture_gpu(torch)
+
+              report_path = performance_recorder.write_report(
+                  extra={
+                      "status": "completed",
+                      "final_video": str(final_video),
+                      "final_video_bytes": final_video.stat().st_size,
+                      "scene_count": len(generated_clips),
+                      "model_load_seconds": round(model_load_seconds, 3),
+                      "video_concat_seconds": round(concat_elapsed, 3),
+                      "resolution": "832x480",
+                      "fps": 16,
+                      "sampling_steps": 8,
+                      "gpu": "NvidiaTeslaT4",
+                  }
+              )
+
+              print("ÜRETİM TAMAMLANDI", flush=True)
+              print("Final:", final_video, flush=True)
+              print("Sahne sayısı:", len(generated_clips), flush=True)
+              print("Dosya boyutu:", final_video.stat().st_size, flush=True)
+              print("Performans raporu:", report_path, flush=True)
+
+          try:
+              main()
+          except Exception as exc:
               traceback.print_exc()
+
+              if performance_recorder is not None:
+                  try:
+                      report_path = performance_recorder.write_report(
+                          extra={
+                              "status": "failed",
+                              "error_type": type(exc).__name__,
+                              "error_message": str(exc),
+                          }
+                      )
+                      print(
+                          "Hata performans raporu:",
+                          report_path,
+                          flush=True
+                      )
+                  except Exception:
+                      traceback.print_exc()
+
               raise
+          '''
+
+          profiler_path = Path("wan_performance.py")
+
+          if not profiler_path.is_file():
+              raise FileNotFoundError(
+                  "wan_performance.py bulunamadı."
+              )
+
+          profiler_source = profiler_path.read_text(
+              encoding="utf-8"
+          )
+
+          compile(
+              profiler_source,
+              "wan_performance.py",
+              "exec"
+          )
+
+          worker = worker.replace(
+              "REQUEST_JSON = None",
+              "REQUEST_JSON = " + repr(
+                  json.dumps(request, ensure_ascii=False)
+              )
+          )
+
+          profiler_bootstrap = (
+              "\nPERFORMANCE_RECORDER_SOURCE = "
+              + repr(profiler_source)
+              + "\nexec(compile("
+              + "PERFORMANCE_RECORDER_SOURCE, "
+              + "'wan_performance.py', 'exec'), globals())\n"
+          )
+
+          if worker.count("def main():") != 1:
+              raise RuntimeError(
+                  "Worker main fonksiyonu tekil olarak bulunamadı."
+              )
+
+          worker = worker.replace(
+              "def main():",
+              profiler_bootstrap + "\ndef main():",
+              1
+          )
+
+          loader_source = Path("wan_kaggle_reference_loader.py")
+
+          if not loader_source.is_file():
+              raise FileNotFoundError(
+                  "wan_kaggle_reference_loader.py bulunamadı."
+              )
+
+          loader_text = loader_source.read_text(encoding="utf-8")
+
+          loader_text = loader_text.replace(
+              "from __future__ import annotations\n",
+              "",
+              1
+          )
+
+          worker = loader_text + "\n\n" + worker
+
+          Path("kaggle-worker/worker.py").write_text(
+              worker,
+              encoding="utf-8"
+          )
+
+          Path("kaggle-worker/wan_kaggle_reference_loader.py").write_text(
+              loader_text,
+              encoding="utf-8"
+          )
+
+          print("Referans yükleyici worker.py içine gömüldü.")
+
+          print("Sahne sayısı:", len(scenes))
+          print("Worker ve metadata hazır.")
           PY
+
+      - name: Karakter referanslarını üret ve Kaggle'a private yükle
+        if: ${{ inputs.run_mode == 'production' && inputs.project_json != '' }}
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          VIDEO_PROJECT_JSON: ${{ inputs.project_json }}
+          IMAGE_ENGINE: cloudflare
+        run: |
+          set -euo pipefail
+
+          echo "Karakter referans üretim bağımlılıkları kuruluyor..."
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+          mkdir -p .work
+
           python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          from wan_project_input import normalize_wan_project
+
+          raw = os.environ.get("VIDEO_PROJECT_JSON", "").strip()
+
+          if not raw:
+              raise SystemExit("Film proje JSON verisi boş.")
+
+          try:
+              source_project = json.loads(raw)
+          except json.JSONDecodeError as exc:
+              raise SystemExit(f"Proje JSON geçersiz: {exc}")
+
+          normalized_project = normalize_wan_project(source_project)
+
+          project_path = Path(".work/project.json")
+          project_path.parent.mkdir(parents=True, exist_ok=True)
+          project_path.write_text(
+              json.dumps(normalized_project, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8"
+          )
+
+          print("Normalize edilmiş film projesi hazır.")
+          print("Ses ayarları:", "audio" in normalized_project)
+          print("Maliyet politikası:", "cost_policy" in normalized_project)
+          PY
+
+          python wan_kaggle_workflow_prepare.py \
+            --project-json .work/project.json \
+            --workspace ".work/production-${GITHUB_RUN_ID}" \
+            --payload-output ".work/payload-${GITHUB_RUN_ID}" \
+            --dataset-output ".work/dataset-${GITHUB_RUN_ID}" \
+            --kaggle-owner "$KAGGLE_USERNAME" \
+            --dataset-slug "cihan-character-refs-${GITHUB_RUN_ID}" \
+            --kernel-metadata kaggle-worker/kernel-metadata.json
+
+      - name: Worker ve Kaggle metadata ön kontrolü
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import ast
           import json
           from pathlib import Path
 
-          worker = Path("kaggle-worker/worker.py")
-          request = json.loads(
-              Path("kaggle-worker/request.json").read_text(encoding="utf-8")
+          worker_path = Path("kaggle-worker/worker.py")
+          metadata_path = Path("kaggle-worker/kernel-metadata.json")
+
+          if not worker_path.is_file():
+              raise SystemExit("Worker dosyası oluşturulmadı.")
+
+          if not metadata_path.is_file():
+              raise SystemExit("Kaggle metadata dosyası oluşturulmadı.")
+
+          source = worker_path.read_text(encoding="utf-8")
+          tree = ast.parse(source, filename=str(worker_path))
+
+          request_value = None
+
+          for node in ast.walk(tree):
+              if not isinstance(node, ast.Assign):
+                  continue
+
+              if any(
+                  isinstance(target, ast.Name)
+                  and target.id == "REQUEST_JSON"
+                  for target in node.targets
+              ):
+                  request_value = ast.literal_eval(node.value)
+                  break
+
+          if not isinstance(request_value, str):
+              raise SystemExit("Worker içine film isteği gömülmemiş.")
+
+          request = json.loads(request_value)
+          metadata = json.loads(
+              metadata_path.read_text(encoding="utf-8")
           )
 
-          source = worker.read_text(encoding="utf-8")
-          source = source.replace(
-              'REQUEST_FILE = Path(__file__).parent / "request.json"',
-              "REQUEST = " + repr(request)
-          )
-          source = source.replace(
-              '    with open(REQUEST_FILE, encoding="utf-8") as f:\n        request = json.load(f)',
-              '    request = REQUEST'
-          )
-          worker.write_text(source, encoding="utf-8")
-          print("İstek worker.py içine yerleştirildi.")
+          required_request_fields = {
+              "topic", "prompt", "style", "character_bible", "scenes",
+              "reference_bundle_required"
+          }
+
+          missing = required_request_fields - set(request)
+          if missing:
+              raise SystemExit(
+                  "Film isteğinde eksik alanlar: "
+                  + ", ".join(sorted(missing))
+              )
+
+          scenes = request["scenes"]
+          if (
+              not isinstance(scenes, list)
+              or not 1 <= len(scenes) <= 15
+              or not all(
+                  isinstance(scene, str) and scene.strip()
+                  for scene in scenes
+              )
+          ):
+              raise SystemExit("Worker sahne listesi geçersiz.")
+
+          if metadata.get("code_file") != "worker.py":
+              raise SystemExit("Kaggle code_file worker.py olmalıdır.")
+
+          if metadata.get("kernel_type") != "script":
+              raise SystemExit("Kaggle kernel_type script olmalıdır.")
+
+          if metadata.get("enable_gpu") is not True:
+              raise SystemExit("Kaggle GPU etkin değil.")
+
+          if metadata.get("machine_shape") != "NvidiaTeslaT4":
+              raise SystemExit("Beklenmeyen Kaggle GPU türü.")
+
+          required_profiler_fragments = [
+              "PerformanceRecorder(",
+              "record_scene(",
+              "capture_gpu(",
+              "performance_report.json",
+          ]
+
+          required_reference_fragments = [
+              "def load_reference_bundle(",
+              'Path("/kaggle/input")',
+              "load_reference_bundle(manifests[0].parent)",
+              "reference_runtime_status.json",
+              "pipeline.prepare_source(",
+              "input_ref_images=source_references",
+              "conditioning_scenes += 1",
+              "conditioning_applied=True",
+          ]
+
+          for fragment in required_reference_fragments:
+              if fragment not in source:
+                  raise SystemExit(
+                      "Karakter referans runtime entegrasyonu eksik: " + fragment
+                  )
+
+          if not Path("kaggle-worker/wan_kaggle_reference_loader.py").is_file():
+              raise SystemExit("Kaggle referans doğrulama modülü Worker'a kopyalanmamış.")
+
+          if request["reference_bundle_required"] is not True and request["reference_bundle_required"] is not False:
+              raise SystemExit("reference_bundle_required boolean olmalıdır.")
+
+          for fragment in required_profiler_fragments:
+              if fragment not in source:
+                  raise SystemExit(
+                      "Performans entegrasyonu eksik: " + fragment
+                  )
+
+          compile(source, str(worker_path), "exec")
+
+          print("Worker Python sözdizimi: OK")
+          print("Film isteği JSON: OK")
+          print("Kaggle metadata: OK")
+          print("Performans kaydedici entegrasyonu: OK")
+          print("Doğrulanan sahne sayısı:", len(scenes))
+          print("GPU profili:", metadata["machine_shape"])
           PY
-      - name: Kaggle GPU görevini başlat
+
+      - name: Wan kaynak kodu uyumluluk ön kontrolü
         run: |
+          set -euo pipefail
+
+          WAN_REPO_COMMIT="9737cba9c1c3c4d04b33fcad41c111989865d315"
+          git init /tmp/Wan2.1
+          git -C /tmp/Wan2.1 remote add origin https://github.com/Wan-Video/Wan2.1.git
+          git -C /tmp/Wan2.1 fetch --depth 1 origin "$WAN_REPO_COMMIT"
+          git -C /tmp/Wan2.1 checkout --detach FETCH_HEAD
+          test "$(git -C /tmp/Wan2.1 rev-parse HEAD)" = "$WAN_REPO_COMMIT"
+
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          repo = Path("/tmp/Wan2.1")
+
+          model_path = repo / "wan/modules/model.py"
+          attention_path = repo / "wan/modules/attention.py"
+          shared_path = repo / "wan/configs/shared_config.py"
+          vace_path = repo / "wan/vace.py"
+          config_path = repo / "wan/configs/__init__.py"
+
+          model_source = model_path.read_text(encoding="utf-8")
+          attention_source = attention_path.read_text(encoding="utf-8")
+          shared_source = shared_path.read_text(encoding="utf-8")
+          config_source = config_path.read_text(encoding="utf-8")
+
+          required_fragments = {
+              "Wan model attention import":
+                  "from .attention import flash_attention",
+              "Wan model attention calls":
+                  "flash_attention(",
+              "SDPA-compatible attention function":
+                  "def attention(",
+              "FP16 conversion target":
+                  "dtype=torch.bfloat16,",
+              "T5 dtype setting":
+                  "wan_shared_cfg.t5_dtype = torch.bfloat16",
+              "DiT dtype setting":
+                  "wan_shared_cfg.param_dtype = torch.bfloat16",
+              "832x480 size preset":
+                  "'832*480': (832, 480)",
+              "1.3B VACE config":
+                  "'vace-1.3B': t2v_1_3B",
+          }
+
+          sources = {
+              "Wan model attention import": model_source,
+              "Wan model attention calls": model_source,
+              "SDPA-compatible attention function": attention_source,
+              "FP16 conversion target": attention_source,
+              "T5 dtype setting": shared_source,
+              "DiT dtype setting": shared_source,
+              "832x480 size preset": config_source,
+              "1.3B VACE config": config_source,
+          }
+
+          for label, fragment in required_fragments.items():
+              if fragment not in sources[label]:
+                  raise SystemExit(
+                      "Wan kaynak kodu uyumsuz: " + label
+                  )
+
+          vace_tree = ast.parse(
+              vace_path.read_text(encoding="utf-8"),
+              filename=str(vace_path)
+          )
+
+          wan_vace = next(
+              (node for node in vace_tree.body
+               if isinstance(node, ast.ClassDef) and node.name == "WanVace"),
+              None
+          )
+          if wan_vace is None:
+              raise SystemExit("WanVace sınıfı bulunamadı.")
+
+          methods = {
+              node.name: node
+              for node in wan_vace.body
+              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+          }
+
+          if not {"__init__", "prepare_source", "generate"}.issubset(methods):
+              raise SystemExit("WanVace constructor/prepare_source/generate API bulunamadı.")
+
+          def argument_names(function):
+              return {
+                  argument.arg
+                  for argument in (
+                      function.args.posonlyargs + function.args.args
+                      + function.args.kwonlyargs
+                  )
+              }
+
+          constructor_required = {
+              "config", "checkpoint_dir", "device_id", "rank",
+              "t5_fsdp", "dit_fsdp", "use_usp", "t5_cpu"
+          }
+
+          prepare_required = {
+              "src_video", "src_mask", "src_ref_images",
+              "num_frames", "image_size", "device"
+          }
+
+          generate_required = {
+              "input_prompt", "input_frames", "input_masks",
+              "input_ref_images", "size", "frame_num", "context_scale",
+              "shift", "sample_solver", "sampling_steps", "guide_scale",
+              "seed", "offload_model"
+          }
+
+          if not constructor_required.issubset(
+              argument_names(methods["__init__"])
+          ):
+              raise SystemExit("WanT2V constructor parametreleri değişmiş.")
+
+          if not prepare_required.issubset(
+              argument_names(methods["prepare_source"])
+          ):
+              raise SystemExit("WanVace prepare_source parametreleri değişmiş.")
+
+          if not generate_required.issubset(
+              argument_names(methods["generate"])
+          ):
+              raise SystemExit("WanVace generate parametreleri değişmiş.")
+
+          print("Wan attention yama noktaları: OK")
+          print("Wan FP16 yapılandırma noktaları: OK")
+          print("Wan 832x480 / VACE 1.3B profili: OK")
+          print("WanVace Python API: OK")
+          PY
+
+      - name: Ön kontrol modunu tamamla
+        if: ${{ inputs.run_mode == 'preflight' }}
+        run: |
+          echo "Ön kontrol başarıyla tamamlandı."
+          echo "Kaggle GPU üretimi başlatılmadı."
+
+      - name: Üretim öncesi maliyet kontrolü
+        if: ${{ inputs.run_mode == 'production' }}
+        env:
+          GEMINI_TTS_FREE_QUOTA_CONFIRMED: ${{ inputs.gemini_tts_free_quota_confirmed }}
+          VIDEO_PROJECT_JSON: ${{ inputs.project_json }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${VIDEO_PROJECT_JSON}" ]; then
+            echo "Eski konu/prompt giriş yöntemi kullanılıyor."
+            echo "Bu yöntemde standart project.json bulunmadığından"
+            echo "ses servisleri için maliyet kontrolü çalıştırılmadı."
+            echo "Mevcut Wan Worker yalnızca sessiz video üretmektedir."
+            echo "Ses üretimi bağlanana kadar bu adımda ücretli ses servisi çağrılmaz."
+            exit 0
+          fi
+
+          if [ ! -f ".work/project.json" ]; then
+            echo "Canonical project.json bulunamadı."
+            echo "Maliyet kontrolü yapılamadığı için üretim durduruldu."
+            exit 1
+          fi
+
+          if [ ! -f "production_cost_guard.py" ]; then
+            echo "production_cost_guard.py bulunamadı."
+            echo "Maliyet kontrolü yapılamadığı için üretim durduruldu."
+            exit 1
+          fi
+
+          python production_cost_guard.py \
+            --project .work/project.json \
+            --report output/cost_report.json
+
+      - name: Kaggle GPU görevini başlat
+        if: ${{ inputs.run_mode == 'production' }}
+        run: |
+          set -euo pipefail
+
           kaggle kernels push \
             -p kaggle-worker \
             --timeout 21600 \
             --accelerator NvidiaTeslaT4
 
       - name: Kaggle görevini takip et
+        if: ${{ inputs.run_mode == 'production' }}
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
         run: |
-          KERNEL="${KAGGLE_USERNAME,,}/cihan-wan-vace-worker"
-          for i in $(seq 1 180); do
+          set -euo pipefail
+
+          KERNEL="${KAGGLE_USERNAME,,}/cihan-multi-scene-film-worker"
+
+          for i in $(seq 1 165); do
             STATUS=$(kaggle kernels status "$KERNEL" 2>&1 || true)
+            STATUS_UPPER=$(printf '%s' "$STATUS" | tr '[:lower:]' '[:upper:]')
+            echo "Kontrol $i/165"
             echo "$STATUS"
 
-            if echo "$STATUS" | grep -q "COMPLETE"; then
+            if printf '%s' "$STATUS_UPPER" | grep -Eq '(^|[^A-Z])COMPLETE([^A-Z]|$)'; then
+              echo "Kaggle üretimi tamamlandı."
               exit 0
             fi
 
-            if echo "$STATUS" | grep -q "ERROR"; then
-              echo "Kaggle üretim görevi hata verdi."
+            if printf '%s' "$STATUS_UPPER" | grep -Eq '(^|[^A-Z])(ERROR|CANCELLED)([^A-Z]|$)'; then
+              echo "Kaggle üretimi başarısız."
               kaggle kernels logs "$KERNEL" || true
               exit 1
             fi
@@ -346,26 +1448,105 @@ jobs:
           kaggle kernels logs "$KERNEL" || true
           exit 1
 
-      - name: MP4 dosyasını Kaggle'dan al
+      - name: Film dosyalarını indir
+        if: ${{ inputs.run_mode == 'production' }}
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
         run: |
-          KERNEL="${KAGGLE_USERNAME,,}/cihan-wan-vace-worker"
-          mkdir -p output
-          kaggle kernels output "$KERNEL" -p output --force
-          find output -maxdepth 2 -type f -print
+          set -euo pipefail
 
-          VIDEO=$(find output -type f -name "*.mp4" | head -n 1)
+          KERNEL="${KAGGLE_USERNAME,,}/cihan-multi-scene-film-worker"
+
+          mkdir -p output
+
+          kaggle kernels output "$KERNEL" -p output --force
+
+          echo "İndirilen dosyalar:"
+          find output -type f -print
+
+          VIDEO=$(find output -type f -name "film.mp4" | head -n 1)
+
           if [ -z "$VIDEO" ]; then
-            echo "Kaggle çıktısında MP4 bulunamadı."
+            echo "Final film bulunamadı."
+            kaggle kernels logs "$KERNEL" || true
             exit 1
           fi
 
-          cp "$VIDEO" output/video.mp4
+          cp "$VIDEO" output/final-film.mp4
 
-      - name: Videoyu GitHub'a yükle
+          REPORT=$(find output -type f -name "performance_report.json" | head -n 1)
+
+          if [ -n "$REPORT" ]; then
+            if [ "$REPORT" -ef "output/performance_report.json" ]; then
+              echo "Performans raporu zaten hedef konumda."
+            else
+              cp "$REPORT" output/performance_report.json
+            fi
+            echo "Performans raporu bulundu ve hazır."
+          else
+            echo "Performans raporu bulunamadı."
+            exit 1
+          fi
+
+          REFERENCE_STATUS=$(find output -type f -name "reference_runtime_status.json" | head -n 1)
+
+          if [ -n "$REFERENCE_STATUS" ]; then
+            if [ "$REFERENCE_STATUS" -ef "output/reference_runtime_status.json" ]; then
+              echo "Referans raporu zaten hedef konumda."
+            else
+              cp "$REFERENCE_STATUS" output/reference_runtime_status.json
+            fi
+            echo "Karakter referans doğrulama raporu hazır."
+          else
+            echo "Karakter referans doğrulama raporu bulunamadı."
+            exit 1
+          fi
+
+      - name: Film seslendirme ve altyazı üretimi
+        if: ${{ inputs.run_mode == 'production' && inputs.project_json != '' }}
+        env:
+          GEMINI_TTS_FREE_QUOTA_CONFIRMED: ${{ inputs.gemini_tts_free_quota_confirmed }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+          cp output/final-film.mp4 output/silent-film.mp4
+
+          python wan_audio_postprocess.py \
+            --project .work/project.json \
+            --video output/silent-film.mp4 \
+            --output output/final-film.mp4 \
+            --work-dir .work/audio
+      - name: MuseTalk giriş paketini hazırla
+        if: ${{ inputs.run_mode == 'production' && inputs.project_json != '' }}
+        run: |
+          set -euo pipefail
+
+          python musetalk_lipsync_prepare.py \
+            --video output/final-film.mp4 \
+            --timeline output/lip_sync_timeline.json \
+            --output-dir output/musetalk_input
+
+          test -s output/musetalk_input.zip
+          echo "MuseTalk giriş paketi hazır."
+      - name: Film ve performans raporunu sakla
+        if: ${{ inputs.run_mode == 'production' }}
         uses: actions/upload-artifact@v4
         with:
-          name: wan-vace-video
-          path: output/video.mp4
+          name: cihan-multi-scene-film
+          path: |
+            output/final-film.mp4
+            output/**/*.mp4
+            output/musetalk_input.zip
+            output/audio_runtime_report.json
+            output/audio_mix_report.json
+            output/final-film.srt
+            output/performance_report.json
+            output/reference_runtime_status.json
+            output/cost_report.json
+            output/lip_sync_timeline.json
+          if-no-files-found: error
           retention-days: 7

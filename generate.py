@@ -574,6 +574,19 @@ def normalize_script_speakers(data):
                 "delivery": safe_text(
                     turn.get("delivery")
                 ) or "natural",
+                "facial_expression": safe_text(
+                    turn.get("facial_expression")
+                ),
+                "mouth_action": safe_text(
+                    turn.get("mouth_action")
+                ),
+                "gesture": safe_text(turn.get("gesture")),
+                "body_language": safe_text(
+                    turn.get("body_language")
+                ),
+                "listener_reaction": safe_text(
+                    turn.get("listener_reaction")
+                ),
                 "listener_ids": [
                     item for item in listeners
                     if item in by_id and item != speaker_id
@@ -904,7 +917,16 @@ def make_keyframe_cloudflare(prompt, path):
         },
         timeout=180,
     )
-    response.raise_for_status()
+
+    if not response.ok:
+        try:
+            error_detail = response.json()
+        except Exception:
+            error_detail = response.text[:2000]
+
+        raise RuntimeError(
+           f"Cloudflare HTTP {response.status_code}: {error_detail}" 
+        )
 
     content_type = response.headers.get(
         "content-type",
@@ -1007,8 +1029,23 @@ def generate_image(prompt, path, engines):
 
 
 # ============================================================
-# VOICE
 # ============================================================
+# VOICE — PROFESSIONAL FREE-FIRST AUDIO ENGINE
+# ============================================================
+
+GEMINI_TTS_FREE_QUOTA_CONFIRMED = (
+    env("GEMINI_TTS_FREE_QUOTA_CONFIRMED", "false").lower()
+    == "true"
+)
+
+TTS_RUNTIME_REPORT = {
+    "requested": [],
+    "providers_used": [],
+    "fallbacks": [],
+    "paid_services_blocked": [],
+    "notes": [],
+}
+
 
 def audio_duration(path):
     result = run([
@@ -1022,14 +1059,10 @@ def audio_duration(path):
     try:
         duration = float(result.stdout.strip())
     except (TypeError, ValueError):
-        raise RuntimeError(
-            f"Ses süresi okunamadı: {path}"
-        )
+        raise RuntimeError(f"Ses süresi okunamadı: {path}")
 
     if duration <= 0:
-        raise RuntimeError(
-            f"Ses dosyası boş: {path}"
-        )
+        raise RuntimeError(f"Ses dosyası boş: {path}")
 
     return duration
 
@@ -1071,14 +1104,82 @@ def estimate_words(text, duration):
     return output
 
 
-def voice_edge(text, output_path, voice_name=None):
+def emotion_direction(emotion, delivery):
+    emotion = safe_text(emotion).lower()
+    delivery = safe_text(delivery).lower()
+
+    directions = {
+        "angry": {
+            "rate": "+8%",
+            "pitch": "+3Hz",
+            "description": "controlled anger, firm articulation",
+        },
+        "sad": {
+            "rate": "-10%",
+            "pitch": "-2Hz",
+            "description": "subdued sadness, gentle delivery",
+        },
+        "excited": {
+            "rate": "+12%",
+            "pitch": "+3Hz",
+            "description": "energetic and enthusiastic delivery",
+        },
+        "fearful": {
+            "rate": "+5%",
+            "pitch": "+2Hz",
+            "description": "nervous but understandable delivery",
+        },
+        "calm": {
+            "rate": "-5%",
+            "pitch": "-1Hz",
+            "description": "calm, composed delivery",
+        },
+        "whispering": {
+            "rate": "-8%",
+            "pitch": "-2Hz",
+            "description": "soft and intimate delivery",
+        },
+        "confident": {
+            "rate": "+2%",
+            "pitch": "+1Hz",
+            "description": "confident and decisive delivery",
+        },
+        "neutral": {
+            "rate": "+0%",
+            "pitch": "+0Hz",
+            "description": "natural conversational delivery",
+        },
+    }
+
+    result = directions.get(
+        emotion,
+        directions["neutral"],
+    ).copy()
+
+    if delivery:
+        result["description"] += f", {delivery}"
+
+    return result
+
+
+def voice_edge(
+    text,
+    output_path,
+    voice_name=None,
+    emotion="neutral",
+    delivery="natural",
+    voice_description="",
+):
     import edge_tts
+
+    direction = emotion_direction(emotion, delivery)
 
     async def synthesize():
         communicator = edge_tts.Communicate(
             text,
             voice_name or EDGE_VOICE,
-            rate=EDGE_RATE,
+            rate=direction["rate"],
+            pitch=direction["pitch"],
         )
 
         audio = bytearray()
@@ -1086,9 +1187,7 @@ def voice_edge(text, output_path, voice_name=None):
 
         async for chunk in communicator.stream():
             if chunk.get("type") == "audio":
-                audio.extend(
-                    chunk.get("data", b"")
-                )
+                audio.extend(chunk.get("data", b""))
 
             elif chunk.get("type") == "WordBoundary":
                 start = (
@@ -1112,9 +1211,7 @@ def voice_edge(text, output_path, voice_name=None):
     audio_data, words = asyncio.run(synthesize())
 
     if len(audio_data) < 1000:
-        raise RuntimeError(
-            "Edge TTS ses üretmedi."
-        )
+        raise RuntimeError("Edge TTS ses üretmedi.")
 
     Path(output_path).write_bytes(audio_data)
 
@@ -1127,21 +1224,27 @@ def voice_edge(text, output_path, voice_name=None):
     return words
 
 
-def voice_gtts(text, output_path, voice_name=None):
+def voice_gtts(
+    text,
+    output_path,
+    voice_name=None,
+    emotion="neutral",
+    delivery="natural",
+    voice_description="",
+):
     from gtts import gTTS
 
     gTTS(
         text=text,
         lang=GTTS_LANG,
+        slow=False,
     ).save(str(output_path))
 
     if (
         not Path(output_path).is_file()
         or Path(output_path).stat().st_size < 1000
     ):
-        raise RuntimeError(
-            "gTTS ses dosyası oluşturamadı."
-        )
+        raise RuntimeError("gTTS ses dosyası oluşturamadı.")
 
     return estimate_words(
         text,
@@ -1149,12 +1252,35 @@ def voice_gtts(text, output_path, voice_name=None):
     )
 
 
-def voice_gemini(text, output_path, voice_name=None):
+def voice_gemini(
+    text,
+    output_path,
+    voice_name=None,
+    emotion="neutral",
+    delivery="natural",
+    voice_description="",
+):
+    if not GEMINI_TTS_FREE_QUOTA_CONFIRMED:
+        raise RuntimeError(
+            "Gemini TTS ücretsiz kotası doğrulanmadı."
+        )
+
     client = gemini_client()
+
+    direction = emotion_direction(emotion, delivery)
+
+    instruction = (
+        f"{GEMINI_TTS_STYLE}\n"
+        f"Emotion: {emotion}.\n"
+        f"Delivery: {direction['description']}.\n"
+        f"Character voice: {voice_description or 'natural voice'}.\n"
+        "Speak the supplied text in Turkish. "
+        "Do not add words, explanations or sound effects."
+    )
 
     response = client.models.generate_content(
         model=GEMINI_TTS_MODEL,
-        contents=f"{GEMINI_TTS_STYLE}\n\n{text}",
+        contents=f"{instruction}\n\n{text}",
         config=types.GenerateContentConfig(
             response_modalities=["AUDIO"],
             speech_config=types.SpeechConfig(
@@ -1174,9 +1300,7 @@ def voice_gemini(text, output_path, voice_name=None):
     ) or []
 
     if not candidates:
-        raise RuntimeError(
-            "Gemini TTS yanıtı boş."
-        )
+        raise RuntimeError("Gemini TTS yanıtı boş.")
 
     parts = getattr(
         candidates[0].content,
@@ -1249,12 +1373,7 @@ VOICE_FUNCTIONS = {
 def create_voice_profiles(characters):
     profiles = build_voice_profiles(characters)
 
-    edge_voices = [
-        EDGE_VOICE,
-        EDGE_FEMALE_VOICE,
-    ]
-
-    for index, character in enumerate(characters):
+    for character in characters:
         cid = safe_text(character.get("id"))
         profile = profiles.get(cid)
 
@@ -1266,9 +1385,12 @@ def create_voice_profiles(characters):
         if not isinstance(custom, dict):
             custom = {}
 
+        # speech_director tarafından belirlenen cinsiyet
+        # ve ses profili korunur.
         profile["edge"] = (
             safe_text(custom.get("edge"))
-            or edge_voices[index % len(edge_voices)]
+            or profile.get("edge")
+            or EDGE_VOICE
         )
 
         profile["gemini"] = (
@@ -1283,22 +1405,19 @@ def create_voice_profiles(characters):
 def build_scene_utterances(scene, profiles):
     utterances = []
 
-    narration = safe_text(
-        scene.get("narration")
-    )
+    narration = safe_text(scene.get("narration"))
 
     if narration:
         utterances.append({
             "text": narration,
             "speaker_id": None,
             "voice": None,
+            "emotion": "neutral",
+            "delivery": "natural",
         })
 
     for turn in scene.get("dialogue_turns") or []:
-        speaker_id = safe_text(
-            turn.get("speaker")
-        )
-
+        speaker_id = safe_text(turn.get("speaker"))
         profile = profiles.get(speaker_id)
 
         if not profile:
@@ -1306,15 +1425,19 @@ def build_scene_utterances(scene, profiles):
                 f"Ses profili bulunamadı: {speaker_id}"
             )
 
-        dialogue = safe_text(
-            turn.get("text")
-        )
+        dialogue = safe_text(turn.get("text"))
 
         if dialogue:
             utterances.append({
                 "text": dialogue,
                 "speaker_id": speaker_id,
                 "voice": profile,
+                "emotion": safe_text(
+                    turn.get("emotion")
+                ) or "neutral",
+                "delivery": safe_text(
+                    turn.get("delivery")
+                ) or "natural",
             })
 
     if not utterances:
@@ -1339,6 +1462,7 @@ def synthesize_scene(scene, index, work, engine, profiles):
 
     for turn_index, utterance in enumerate(utterances):
         voice_profile = utterance.get("voice") or {}
+
         voice_name = None
 
         if engine == "edge":
@@ -1363,6 +1487,9 @@ def synthesize_scene(scene, index, work, engine, profiles):
                 utterance["text"],
                 segment,
                 voice_name,
+                utterance.get("emotion", "neutral"),
+                utterance.get("delivery", "natural"),
+                voice_profile.get("voice_description", ""),
             ),
             f"{engine} ses {index + 1}/{turn_index + 1}",
             tries=2,
@@ -1422,19 +1549,57 @@ def synthesize_scene(scene, index, work, engine, profiles):
 def synthesize_all(scenes, work, characters):
     profiles = create_voice_profiles(characters)
 
+    configured = env_list(
+        "TTS_ENGINES",
+        "gemini,edge,gtts",
+    )
+
+    TTS_RUNTIME_REPORT["requested"] = list(configured)
+
     engines = []
 
-    for engine in TTS_ENGINES:
-        if engine in VOICE_FUNCTIONS and engine not in engines:
+    for engine in configured:
+        engine = engine.lower()
+
+        if engine == "xai":
+            TTS_RUNTIME_REPORT["paid_services_blocked"].append(
+                "xAI/Grok TTS"
+            )
+            log(
+                "     xAI/Grok TTS engellendi: "
+                "ücretli servis için otomatik izin yok."
+            )
+            continue
+
+        if engine not in VOICE_FUNCTIONS:
+            log(f"     Desteklenmeyen ses motoru atlandı: {engine}")
+            continue
+
+        if engine == "gemini" and not GEMINI_TTS_FREE_QUOTA_CONFIRMED:
+            log(
+                "     Gemini TTS atlandı: ücretsiz kota "
+                "kullanıcı tarafından doğrulanmadı."
+            )
+            continue
+
+        if engine not in engines:
             engines.append(engine)
 
+    # Gemini kotası doğrulanmadığında ücretsiz yedekler
+    # otomatik olarak hazır tutulur.
+    for fallback in ("edge", "gtts"):
+        if fallback not in engines:
+            engines.append(fallback)
+
     if not engines:
-        engines = ["edge", "gtts"]
+        raise RuntimeError(
+            "Kullanılabilir ücretsiz ses motoru bulunamadı."
+        )
 
     last_error = None
 
     for engine in engines:
-        log(f"     Ses motoru: {engine}")
+        log(f"     Ses motoru deneniyor: {engine}")
 
         results = []
 
@@ -1451,8 +1616,33 @@ def synthesize_all(scenes, work, characters):
                 results.append((audio, words))
 
                 log(
-                    f"     Ses {index + 1}/{len(scenes)} hazır."
+                    f"     {engine}: "
+                    f"ses {index + 1}/{len(scenes)} hazır."
                 )
+
+            TTS_RUNTIME_REPORT["providers_used"] = [engine]
+
+            if engine != engines[0]:
+                TTS_RUNTIME_REPORT["fallbacks"].append({
+                    "failed_provider": engines[0],
+                    "selected_provider": engine,
+                })
+
+            if engine == "gtts":
+                TTS_RUNTIME_REPORT["notes"].append(
+                    "gTTS duygu ve karakter sesi kontrolü sunmaz."
+                )
+
+            if engine == "edge":
+                TTS_RUNTIME_REPORT["notes"].append(
+                    "Edge TTS duygu yönlendirmesi hız ve perde "
+                    "ayarlarıyla sınırlıdır."
+                )
+
+            write_json(
+                Path(work) / "audio_runtime_report.json",
+                TTS_RUNTIME_REPORT,
+            )
 
             return results
 
@@ -1460,8 +1650,8 @@ def synthesize_all(scenes, work, characters):
             last_error = exc
 
             log(
-                f"     {engine} başarısız; "
-                f"sonraki ses motoruna geçiliyor: {str(exc)[:180]}"
+                f"     {engine} başarısız: "
+                f"{str(exc)[:220]}"
             )
 
             for pattern in (
@@ -1472,12 +1662,14 @@ def synthesize_all(scenes, work, characters):
                 for path in Path(work).glob(pattern):
                     path.unlink(missing_ok=True)
 
+    write_json(
+        Path(work) / "audio_runtime_report.json",
+        TTS_RUNTIME_REPORT,
+    )
+
     raise RuntimeError(
         f"Hiçbir ses motoru çalışmadı: {last_error}"
     )
-
-
-# ============================================================
 # OPTIONAL REAL VIDEO MOTION
 # ============================================================
 
@@ -1495,14 +1687,12 @@ def make_motion(image_path, prompt, duration, output_path):
 
     result = fal_client.subscribe(
         VIDEO_MODEL,
-        arguments={
+                arguments={
             "prompt": prompt,
             "image_url": uploaded,
             "resolution": VIDEO_RES,
             "aspect_ratio": "9:16",
-            "duration": duration,
-            "negative_prompt": NEGATIVE,
-            "enable_safety_checker": True,
+            "duration": str(duration),
         },
     )
 
@@ -1518,6 +1708,54 @@ def make_motion(image_path, prompt, duration, output_path):
 
 
 def motion_text(style, scene):
+    acting_fields = (
+        ("FACIAL EXPRESSIONS", "facial_expression"),
+        ("GAZE DIRECTION", "gaze_direction"),
+        ("HEAD MOVEMENT", "head_movement"),
+        ("BODY LANGUAGE", "body_language"),
+        ("GESTURES", "gesture_direction"),
+        ("ACTING DIRECTION", "acting_direction"),
+    )
+
+    acting_details = []
+
+    for label, field in acting_fields:
+        value = safe_text(scene.get(field))
+        if value:
+            acting_details.append(f"{label}:\n{value}")
+
+    dialogue_details = []
+
+    for turn in scene.get("dialogue_turns") or []:
+        if not isinstance(turn, dict):
+            continue
+
+        speaker = safe_text(turn.get("speaker"))
+        expression = safe_text(turn.get("facial_expression"))
+        mouth = safe_text(turn.get("mouth_action"))
+        gesture = safe_text(turn.get("gesture"))
+        body = safe_text(turn.get("body_language"))
+        reaction = safe_text(turn.get("listener_reaction"))
+
+        details = [
+            f"ACTIVE SPEAKER: {speaker}",
+            f"DIALOGUE: {safe_text(turn.get('text'))}",
+            f"EMOTION: {safe_text(turn.get('emotion'))}",
+            f"DELIVERY: {safe_text(turn.get('delivery'))}",
+        ]
+
+        for label, value in (
+            ("FACIAL EXPRESSION", expression),
+            ("MOUTH ACTION", mouth),
+            ("GESTURE", gesture),
+            ("BODY LANGUAGE", body),
+            ("LISTENER REACTION", reaction),
+        ):
+            if value:
+                details.append(f"{label}: {value}")
+
+        dialogue_details.append("\n".join(details))
+
     return f"""
 VISUAL STYLE:
 {style}
@@ -1530,6 +1768,23 @@ PHYSICAL ACTION:
 
 ANIMATION:
 {safe_text(scene.get('motion_prompt'))}
+
+CHARACTER PERFORMANCE:
+{chr(10).join(acting_details)}
+
+DIALOGUE PERFORMANCE:
+{chr(10).join(dialogue_details)}
+
+PERFORMANCE RULES:
+- Use natural, continuous facial animation.
+- Preserve character identity and facial structure.
+- Use meaningful eye contact and natural blinking.
+- Animate head movement and gestures according to emotion.
+- The active speaker should be visually identifiable.
+- Listeners should react naturally without appearing to speak.
+- Avoid frozen expressions and repetitive gestures.
+- Keep body movement physically believable.
+- Do not create random or exaggerated mouth movements.
 
 Preserve character identity, clothing and proportions.
 Use natural body movement and cinematic camera motion.
@@ -2152,7 +2407,7 @@ def main():
                     min(
                         12,
                         max(
-                            3,
+                            4,
                             math.ceil(
                                 audio_duration(audio_path) + PAD
                             ),

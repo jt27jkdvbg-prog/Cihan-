@@ -1,0 +1,543 @@
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+MuseTalk Full Film Compositor v1.0
+
+Onaylanmış MuseTalk konuşma kliplerini ana filmin
+orijinal zamanlarına yerleştirir.
+
+- Ana filmin orijinal sesini korur.
+- MuseTalk kliplerinin seslerini kullanmaz.
+- Klipleri orijinal zaman damgalarına yerleştirir.
+- Ana video süresini ve çözünürlüğünü korur.
+- Çakışan diyalog zamanlarında güvenli şekilde durur.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+import subprocess
+
+from pathlib import Path
+from typing import Any
+
+
+VERSION = "1.0.0"
+
+
+def fail(message: str) -> None:
+    raise RuntimeError(message)
+
+
+def run(command: list[str]) -> str:
+    result = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+
+    if result.returncode != 0:
+        fail(
+            "Komut başarısız:\n"
+            + " ".join(command)
+            + "\n"
+            + result.stderr[-5000:]
+        )
+
+    return result.stdout.strip()
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"JSON bulunamadı: {path}")
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        fail(f"JSON okunamadı: {exc}")
+
+    if not isinstance(data, dict):
+        fail("JSON kök verisi nesne olmalıdır.")
+
+    return data
+
+
+def write_json(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    temporary = path.with_suffix(path.suffix + ".tmp")
+
+    temporary.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    temporary.replace(path)
+
+
+def require_binary(name: str) -> None:
+    if shutil.which(name) is None:
+        fail(f"Gerekli program bulunamadı: {name}")
+
+
+def probe_media(path: Path) -> dict[str, Any]:
+    output = run([
+        "ffprobe",
+        "-v", "error",
+        "-show_entries",
+        "format=duration:stream=codec_type,width,height",
+        "-of", "json",
+        str(path),
+    ])
+
+    try:
+        data = json.loads(output)
+    except Exception as exc:
+        fail(f"Medya bilgisi okunamadı: {path}: {exc}")
+
+    duration = float(
+        data.get("format", {}).get("duration", 0)
+    )
+
+    if duration <= 0:
+        fail(f"Medya süresi geçersiz: {path}")
+
+    video_streams = [
+        stream
+        for stream in data.get("streams", [])
+        if stream.get("codec_type") == "video"
+    ]
+
+    if not video_streams:
+        fail(f"Video akışı bulunamadı: {path}")
+
+    video = video_streams[0]
+
+    return {
+        "duration_seconds": duration,
+        "width": int(video.get("width", 0)),
+        "height": int(video.get("height", 0)),
+        "has_audio": any(
+            stream.get("codec_type") == "audio"
+            for stream in data.get("streams", [])
+        ),
+    }
+
+
+def resolve_clip(
+    file_value: str,
+    report_dir: Path,
+    clips_root: Path | None,
+) -> Path:
+
+    supplied = Path(file_value)
+
+    candidates = []
+
+    if supplied.is_absolute():
+        candidates.append(supplied)
+
+    candidates.append(report_dir / supplied)
+    candidates.append(report_dir / supplied.name)
+
+    if clips_root is not None:
+        clips_root = clips_root.resolve()
+        candidates.append(clips_root / supplied.name)
+
+    for candidate in candidates:
+        candidate = candidate.resolve()
+
+        if candidate.is_file() and candidate.stat().st_size > 0:
+            return candidate
+
+    search_roots = [report_dir]
+
+    if clips_root is not None:
+        search_roots.insert(0, clips_root.resolve())
+
+    matches = []
+
+    for root in search_roots:
+        if root.is_dir():
+            matches.extend(
+                path
+                for path in root.rglob(supplied.name)
+                if path.is_file() and path.stat().st_size > 0
+            )
+
+    unique_matches = list(dict.fromkeys(
+        path.resolve() for path in matches
+    ))
+
+    if len(unique_matches) == 1:
+        return unique_matches[0]
+
+    if len(unique_matches) > 1:
+        fail(
+            f"Aynı isimde birden fazla klip bulundu: "
+            f"{supplied.name}. --clips-root ile doğru klasörü belirt."
+        )
+
+    fail(f"MuseTalk klibi bulunamadı: {file_value}")
+
+
+def build_segments(
+    report: dict[str, Any],
+    report_path: Path,
+    clips_root: Path | None,
+    base_info: dict[str, Any],
+) -> list[dict[str, Any]]:
+
+    if report.get("status") != "dialogue_clips_generated":
+        fail(
+            "Worker raporu dialogue_clips_generated "
+            "durumunda değil."
+        )
+
+    tasks = report.get("dialogue_tasks")
+    generated = report.get("generated_videos")
+
+    if not isinstance(tasks, list) or not tasks:
+        fail("Worker raporunda diyalog görevleri bulunamadı.")
+
+    if not isinstance(generated, list) or not generated:
+        fail("Worker raporunda üretilmiş video bulunamadı.")
+
+    task_by_index = {}
+
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+
+        index = task.get("dialogue_index")
+
+        if not isinstance(index, int) or index in task_by_index:
+            fail("Diyalog görev indeksleri geçersiz veya tekrarlı.")
+
+        task_by_index[index] = task
+
+    segments = []
+    seen_indices = set()
+
+    for item in generated:
+        if not isinstance(item, dict):
+            fail("Üretilmiş video kaydı geçersiz.")
+
+        index = item.get("dialogue_index")
+
+        if not isinstance(index, int) or index in seen_indices:
+            fail("Üretilmiş video diyalog indeksi geçersiz veya tekrarlı.")
+
+        seen_indices.add(index)
+
+        task = task_by_index.get(index)
+
+        if task is None:
+            fail(f"Diyalog {index}: görev kaydı bulunamadı.")
+
+        try:
+            start = float(task["film_start_seconds"])
+            end = float(task["film_end_seconds"])
+            expected_duration = float(
+                task["audio_duration_seconds"]
+            )
+        except (KeyError, TypeError, ValueError):
+            fail(f"Diyalog {index}: zaman bilgileri geçersiz.")
+
+        if start < 0 or end <= start:
+            fail(f"Diyalog {index}: zaman aralığı geçersiz.")
+
+        if end > base_info["duration_seconds"] + 0.25:
+            fail(f"Diyalog {index}: ana film süresi aşılıyor.")
+
+        if expected_duration <= 0:
+            fail(f"Diyalog {index}: beklenen ses süresi geçersiz.")
+
+        if abs((end - start) - expected_duration) > 1.0:
+            fail(
+                f"Diyalog {index}: zaman çizelgesi ve ses süresi "
+                "birbiriyle uyuşmuyor."
+            )
+
+        clip = resolve_clip(
+            str(item["file"]),
+            report_path.parent,
+            clips_root,
+        )
+
+        clip_info = probe_media(clip)
+
+        if abs(
+            clip_info["duration_seconds"] - expected_duration
+        ) > 1.5:
+            fail(
+                f"Diyalog {index}: MuseTalk klip süresi "
+                "beklenen süreyle uyuşmuyor."
+            )
+
+        if (
+            clip_info["width"] != base_info["width"]
+            or clip_info["height"] != base_info["height"]
+        ):
+            fail(
+                f"Diyalog {index}: klip çözünürlüğü ana filmle "
+                "aynı değil. Otomatik ölçekleme yapılmadı."
+            )
+
+        segments.append({
+            "dialogue_index": index,
+            "speaker_id": item.get("speaker_id"),
+            "start": start,
+            "end": end,
+            "duration": clip_info["duration_seconds"],
+            "clip": clip,
+        })
+
+    segments.sort(key=lambda item: item["start"])
+
+    for previous, current in zip(segments, segments[1:]):
+        if current["start"] < previous["end"] - 0.03:
+            fail(
+                "Diyalog zamanları çakışıyor: "
+                f"{previous['dialogue_index']} ve "
+                f"{current['dialogue_index']}. "
+                "Eşzamanlı konuşmalar için ayrı bir "
+                "çoklu-yüz birleştirme yöntemi gerekiyor."
+            )
+
+    return segments
+
+
+def composite(
+    video_path: Path,
+    report_path: Path,
+    output_path: Path,
+    clips_root: Path | None,
+) -> dict[str, Any]:
+
+    require_binary("ffmpeg")
+    require_binary("ffprobe")
+
+    video_path = video_path.resolve()
+    report_path = report_path.resolve()
+    output_path = output_path.resolve()
+
+    if not video_path.is_file():
+        fail(f"Ana video bulunamadı: {video_path}")
+
+    if not report_path.is_file():
+        fail(f"MuseTalk raporu bulunamadı: {report_path}")
+
+    if video_path == output_path:
+        fail("Çıktı dosyası kaynak videonun üzerine yazılamaz.")
+
+    if output_path.exists():
+        fail(
+            "Çıktı dosyası zaten mevcut. "
+            "Farklı bir dosya adı kullan: "
+            + str(output_path)
+        )
+
+    report = read_json(report_path)
+    base_info = probe_media(video_path)
+
+    segments = build_segments(
+        report,
+        report_path,
+        clips_root,
+        base_info,
+    )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    temporary_output = output_path.with_name(
+        output_path.stem + ".compositing" + output_path.suffix
+    )
+
+    if temporary_output.exists():
+        temporary_output.unlink()
+
+    command = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
+
+    command.extend(["-i", str(video_path)])
+
+    for segment in segments:
+        command.extend(["-i", str(segment["clip"])])
+
+    graph = ["[0:v]setpts=PTS-STARTPTS[vbase]"]
+    previous_label = "vbase"
+
+    for index, segment in enumerate(segments, start=1):
+        source_label = f"vsrc{index}"
+        output_label = f"vout{index}"
+
+        start = segment["start"]
+
+        graph.append(
+            f"[{index}:v]"
+            f"setpts=PTS-STARTPTS+{start:.6f}/TB"
+            f"[{source_label}]"
+        )
+
+        graph.append(
+            f"[{previous_label}][{source_label}]"
+            f"overlay=x=0:y=0:"
+            f"eof_action=pass:"
+            f"repeatlast=0:"
+            f"shortest=0:"
+            f"format=auto"
+            f"[{output_label}]"
+        )
+
+        previous_label = output_label
+
+    filter_graph = ";".join(graph)
+
+    command.extend([
+        "-filter_complex", filter_graph,
+        "-map", f"[{previous_label}]",
+        "-map", "0:a?",
+        "-map_metadata", "0",
+        "-c:v", "libx264",
+        "-preset", "medium",
+        "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "copy",
+        "-t", f"{base_info['duration_seconds']:.6f}",
+        "-movflags", "+faststart",
+        str(temporary_output),
+    ])
+
+    try:
+        run(command)
+
+        if not temporary_output.is_file():
+            fail("Birleştirme çıktısı oluşturulamadı.")
+
+        if temporary_output.stat().st_size == 0:
+            fail("Birleştirme çıktısı boş.")
+
+        output_info = probe_media(temporary_output)
+
+        if abs(
+            output_info["duration_seconds"]
+            - base_info["duration_seconds"]
+        ) > 0.20:
+            fail(
+                "Son video süresi ana filmden farklı. "
+                f"Ana film: {base_info['duration_seconds']:.3f}s, "
+                f"çıktı: {output_info['duration_seconds']:.3f}s"
+            )
+
+        if (
+            output_info["width"] != base_info["width"]
+            or output_info["height"] != base_info["height"]
+        ):
+            fail("Son video çözünürlüğü ana filmle eşleşmiyor.")
+
+        if base_info["has_audio"] and not output_info["has_audio"]:
+            fail("Ana filmin sesi çıktı dosyasında bulunamadı.")
+
+        temporary_output.replace(output_path)
+
+    except Exception:
+        if temporary_output.exists():
+            temporary_output.unlink()
+        raise
+
+    result = {
+        "version": VERSION,
+        "status": "full_film_composited",
+        "lip_sync_rendered": True,
+        "full_film_composited": True,
+        "source_video": str(video_path),
+        "source_report": str(report_path),
+        "output_video": str(output_path),
+        "original_audio_preserved": base_info["has_audio"],
+        "source_duration_seconds": round(
+            base_info["duration_seconds"], 4
+        ),
+        "output_duration_seconds": round(
+            output_info["duration_seconds"], 4
+        ),
+        "resolution": {
+            "width": output_info["width"],
+            "height": output_info["height"],
+        },
+        "composited_dialogue_count": len(segments),
+        "segments": [
+            {
+                "dialogue_index": item["dialogue_index"],
+                "speaker_id": item["speaker_id"],
+                "start_seconds": round(item["start"], 4),
+                "end_seconds": round(item["end"], 4),
+                "clip": str(item["clip"]),
+            }
+            for item in segments
+        ],
+        "note": (
+            "MuseTalk video frames were composited at their "
+            "original film timestamps. Original film audio "
+            "was mapped from the source video. Dialogue clips' "
+            "audio streams were not used."
+        ),
+    }
+
+    report_output = output_path.with_name(
+        output_path.stem + "_composite_report.json"
+    )
+
+    write_json(report_output, result)
+
+    result["composite_report"] = str(report_output)
+
+    print(
+        json.dumps(result, ensure_ascii=False, indent=2),
+        flush=True,
+    )
+
+    return result
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="MuseTalk full film compositor"
+    )
+
+    parser.add_argument("--video", required=True)
+    parser.add_argument("--report", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument(
+        "--clips-root",
+        default=None,
+        help="MuseTalk çıktı klasörü. İsteğe bağlı.",
+    )
+
+    args = parser.parse_args()
+
+    try:
+        composite(
+            video_path=Path(args.video),
+            report_path=Path(args.report),
+            output_path=Path(args.output),
+            clips_root=(
+                Path(args.clips_root)
+                if args.clips_root
+                else None
+            ),
+        )
+
+    except Exception as exc:
+        raise SystemExit(f"HATA: {exc}") from exc
+
+
+if __name__ == "__main__":
+    main()
+
+    

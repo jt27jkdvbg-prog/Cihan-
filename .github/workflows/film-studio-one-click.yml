@@ -1,0 +1,168 @@
+
+name: Cihan Film Studio - Tek Giriş
+
+on:
+  workflow_dispatch:
+    inputs:
+      konu:
+        description: "Filmin konusu"
+        required: true
+        type: string
+      sure:
+        description: "Hedef süre (saniye, mevcut sistem 15-180)"
+        required: true
+        default: "60"
+        type: string
+      tarz:
+        description: "Filmin görsel tarzı"
+        required: true
+        default: "cinematic realistic"
+        type: string
+      dil:
+        description: "Filmin dili"
+        required: true
+        default: "Turkish"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  prepare_project:
+    name: Senaryo ve film projesini oluştur
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    outputs:
+      project_json: ${{ steps.export.outputs.project_json }}
+
+    steps:
+      - name: Depoyu indir
+        uses: actions/checkout@v4
+
+      - name: Python kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Sistem bağımlılıklarını kur
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake
+
+      - name: Proje bağımlılıklarını kur
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Yerel Qwen çalışma zamanını kur
+        run: |
+          set -euo pipefail
+          CMAKE_ARGS="-DGGML_NATIVE=OFF" pip install --prefer-binary \
+            llama-cpp-python==0.3.16 \
+            --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+
+      - name: Qwen3-4B modelini indir
+        env:
+          MODEL_URL: https://huggingface.co/ggml-org/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf
+        run: |
+          set -euo pipefail
+          mkdir -p .models
+          curl --location --fail --retry 4 --retry-delay 3 \
+            "$MODEL_URL" \
+            -o .models/Qwen3-4B-Q4_K_M.gguf
+          test -s .models/Qwen3-4B-Q4_K_M.gguf
+
+      - name: Senaryoyu ve bütün sahneleri otomatik oluştur
+        env:
+          LOCAL_QWEN_MODEL_PATH: .models/Qwen3-4B-Q4_K_M.gguf
+          LOCAL_QWEN_CONTEXT: "8192"
+          LOCAL_QWEN_MAX_TOKENS: "12000"
+          VIDEO_LANGUAGE: ${{ inputs.dil }}
+          TARGET_SECONDS: ${{ inputs.sure }}
+          FILM_TOPIC: ${{ inputs.konu }}
+          FILM_STYLE: ${{ inputs.tarz }}
+          FILM_LANGUAGE: ${{ inputs.dil }}
+          FILM_DURATION: ${{ inputs.sure }}
+          LLM_PROVIDER_ORDER: local_qwen
+        run: |
+          set -euo pipefail
+
+          python local_film_studio.py prepare \
+            --topic "$FILM_TOPIC" \
+            --style "$FILM_STYLE" \
+            --language "$FILM_LANGUAGE" \
+            --duration "$FILM_DURATION" \
+            --output .work/film_studio/project.json \
+            --cost-report .work/film_studio/reports/cost_report.json \
+            --status .work/film_studio/reports/studio_status.json
+
+      - name: Film projesini doğrula
+        run: |
+          set -euo pipefail
+
+          python film_studio.py validate \
+            --project .work/film_studio/project.json
+
+          python -m py_compile local_film_studio.py
+
+          test -s .work/film_studio/project.json
+
+      - name: Projeyi otomatik olarak sonraki aşamaya aktar
+        id: export
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import os
+          import uuid
+          from pathlib import Path
+
+          project_path = Path(".work/film_studio/project.json")
+
+          if not project_path.is_file():
+              raise SystemExit("Oluşturulan film projesi bulunamadı.")
+
+          project_json = project_path.read_text(encoding="utf-8").strip()
+
+          if not project_json:
+              raise SystemExit("Film projesi boş.")
+
+          size = len(project_json.encode("utf-8"))
+
+          if size > 900_000:
+              raise SystemExit(
+                  f"Film projesi aktarım sınırını aşıyor: {size} byte."
+              )
+
+          delimiter = "FILM_PROJECT_" + uuid.uuid4().hex
+
+          with open(
+              os.environ["GITHUB_OUTPUT"],
+              "a",
+              encoding="utf-8"
+          ) as output:
+              output.write(f"project_json<<{delimiter}\n")
+              output.write(project_json)
+              output.write("\n")
+              output.write(f"{delimiter}\n")
+
+          print("Film projesi sonraki aşamaya aktarıma hazır.")
+          print("Proje boyutu:", size, "byte")
+          PY
+
+  render_film:
+    name: Karakterler, video, ses ve MP4 üretimi
+    needs: prepare_project
+
+    uses: ./.github/workflows/wan-vace-kaggle.yml
+
+    with:
+      project_json: ${{ needs.prepare_project.outputs.project_json }}
+      run_mode: production
+      gemini_tts_free_quota_confirmed: false
+
+    secrets: inherit

@@ -3,9 +3,17 @@ name: Otomatik Testler
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - cinematic-pipeline-v2
+      - cinematic-pipeline-v3
+
   pull_request:
-    branches: [main]
+    branches:
+      - main
+      - cinematic-pipeline-v2
+      - cinematic-pipeline-v3
+
   workflow_dispatch:
 
 permissions:
@@ -14,6 +22,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Depoyu indir
@@ -25,13 +34,47 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: FFmpeg kur
+      - name: FFmpeg kontrolü
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg fonts-dejavu-core
+          if command -v ffmpeg >/dev/null 2>&1; then
+            ffmpeg -version | head -n 1
+          else
+            echo "FFmpeg bulunamadı. Birim testleri medya kodlaması yapmadığı için devam ediliyor."
+          fi
 
       - name: Paketleri kur
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
 
-      - name: Testleri çalıştır
+      - name: Python dosyalarını derleme kontrolü
+        run: |
+          python -m compileall -q \
+            film_studio.py \
+            film_project.py \
+            generate.py \
+            camera_director.py \
+            cinematic_director.py \
+            dialogue_director.py \
+            speech_director.py \
+            quality_gate.py \
+            pipeline_config.py \
+            wan_performance.py \
+            wan_audio_postprocess.py \
+            production_orchestrator.py \
+            tests/test_production_orchestrator.py
+
+      - name: Film stüdyosu komut kontrolü
+        run: |
+          python film_studio.py --help
+          python film_studio.py doctor --help
+
+      - name: Ana testleri çalıştır
         run: python -m unittest discover -s tests -v
+
+      - name: Wan performans testlerini çalıştır
+        run: python -m pytest tests/test_wan_performance.py -v
+
+      - name: Ses yönetmeni testlerini çalıştır
+        run: python -m unittest test_speech_director -v
+

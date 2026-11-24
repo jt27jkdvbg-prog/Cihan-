@@ -68,14 +68,14 @@ def build_script_prompt(
     except (TypeError, ValueError):
         seconds = 60
 
-    scene_count = max(8, min(12, round(seconds / 6)))
+    scene_count = max(8, min(15, round(seconds / 5.0625)))
     style_description = resolve_visual_style(
         visual_style, custom_style
     )
 
     return f"""
 You are an award-winning film director, screenwriter,
-cinematographer and character performance director.
+cinematographer and professional character performance director.
 
 Create an original cinematic short film in {language}.
 
@@ -96,24 +96,58 @@ VISUAL STYLE:
 
 CHARACTER REQUIREMENTS:
 - Create between 2 and 8 recurring characters.
-- Choose the number of characters according to the story.
 - Give every character a unique stable ID.
 - Define age, appearance, hair, clothing, personality and voice style.
 - Preserve each character's identity in every scene.
 - Never randomly change faces, hairstyles or clothing.
 - Characters must have distinct motivations and personalities.
-- Do not make every character speak in the same way.
+- Give every character recognizable behavior and body language.
+- Avoid identical facial expressions for all characters.
 
 DIALOGUE REQUIREMENTS:
 - This is a character-driven film, not a narrated slideshow.
 - Dialogue must be written as separate ordered turns.
 - Every dialogue turn must identify its speaker by character ID or name.
-- Characters must respond to what other characters actually say.
+- Characters must respond naturally to what others actually say.
 - Include natural reactions, questions, disagreements and pauses.
-- Use more than two speakers when the story benefits from it.
-- Avoid repetitive exposition and artificial conversations.
-- Narration is optional and must not replace character interaction.
+- Narration must not replace character interaction.
 - Do not invent dialogue for characters who are not present.
+- Give every spoken line a suitable emotion and delivery.
+- Specify the speaking character's facial expression.
+- Specify the speaking character's mouth and jaw behavior naturally.
+- Specify the listener's visible reaction.
+- Avoid making every character constantly move their hands.
+
+FACIAL PERFORMANCE REQUIREMENTS:
+- Expressions must change naturally with the emotional context.
+- Use subtle eyebrow movement, eye movement and facial tension.
+- Describe whether the character smiles, frowns, squints or looks worried.
+- Avoid frozen faces and exaggerated repetitive expressions.
+- Characters should blink naturally at appropriate moments.
+- Eye contact must follow the conversation and scene geography.
+- Characters should look at the person they are addressing.
+- Listening characters must react while another character speaks.
+- Expressions must evolve during the shot instead of remaining static.
+
+BODY LANGUAGE AND GESTURE REQUIREMENTS:
+- Describe meaningful hand and arm gestures.
+- Specify posture, shoulder movement and body orientation.
+- Use restrained gestures for serious conversations.
+- Use confident gestures for determined characters.
+- Use nervous gestures only when motivated by the scene.
+- Avoid random hand waving and repetitive movements.
+- Give each character distinct physical behavior.
+- Include natural head turns, nods and small posture changes.
+- Movements must remain physically plausible and continuous.
+
+LIP MOVEMENT REQUIREMENTS:
+- The active speaker must be clearly identified in every dialogue turn.
+- Describe natural speech-related mouth and jaw movement.
+- The listener should not appear to speak during another character's line.
+- Do not describe all visible characters as speaking simultaneously.
+- Prefer clear close-ups of the active speaker during important lines.
+- Keep the speaking character's face visible whenever possible.
+- Do not confuse visual mouth movement instructions with actual audio lip-sync rendering.
 
 SHOT REQUIREMENTS:
 - Plan visual shots for each scene.
@@ -123,6 +157,7 @@ SHOT REQUIREMENTS:
 - Use over-the-shoulder shots during conversations.
 - Use tracking and dolly shots when characters move.
 - Specify which characters are visible in each shot.
+- Specify the focus character.
 - Do not describe a static image as if it were real motion.
 
 Return ONLY valid JSON with this structure:
@@ -151,6 +186,12 @@ Return ONLY valid JSON with this structure:
       "camera": "Camera framing and movement",
       "image_prompt": "Detailed first-frame visual prompt",
       "motion_prompt": "Specific continuous physical movement",
+      "facial_expression": "Detailed expressions of visible characters",
+      "gaze_direction": "Who looks at whom and when",
+      "head_movement": "Natural head turns and nods",
+      "body_language": "Posture, shoulders and body orientation",
+      "gesture_direction": "Meaningful hand and arm gestures",
+      "acting_direction": "Complete emotional performance direction",
       "sound": "Ambience and physical sound effects",
       "dialogue_turns": [
         {{
@@ -158,16 +199,24 @@ Return ONLY valid JSON with this structure:
           "text": "Dialogue in {language}",
           "emotion": "concerned",
           "delivery": "natural",
-          "listener_ids": ["character_2"]
+          "facial_expression": "Focused eyes and slightly furrowed brows",
+          "mouth_action": "Natural speech-related lip and jaw movement",
+          "gesture": "Small controlled hand gesture",
+          "body_language": "Leaning slightly forward",
+          "listener_ids": ["character_2"],
+          "listener_reaction": "The listener watches the speaker attentively"
         }}
       ],
       "shot_plan": [
         {{
-          "shot_type": "wide",
+          "shot_type": "close_up",
           "visible_characters": ["character_1", "character_2"],
           "focus_character": "character_1",
-          "camera": "Slow cinematic tracking shot",
-          "action": "Characters look toward each other"
+          "camera": "Slow cinematic push-in",
+          "action": "The speaker talks while the listener reacts",
+          "facial_expression": "Concerned expression",
+          "gaze_direction": "Speaker maintains eye contact",
+          "gesture": "Restrained hand movement"
         }}
       ],
       "transition": "Transition description"
@@ -184,6 +233,9 @@ PRODUCTION RULES:
 - Use natural dialogue in {language}.
 - Use varied cinematic compositions.
 - Avoid repeated or generic filler scenes.
+- Keep facial expressions and gestures consistent with dialogue.
+- Ensure the active speaker is visually identifiable.
+- No frozen expressions during dialogue.
 - Do not use copyrighted existing characters.
 - Do not invent facts about real people or history.
 - Return valid JSON only, without Markdown.
@@ -192,6 +244,15 @@ PRODUCTION RULES:
 
 def enrich_image_prompt(style, character_bible, scene):
     style_description = resolve_visual_style(style)
+
+    acting_fields = (
+        ("Facial expression", "facial_expression"),
+        ("Gaze direction", "gaze_direction"),
+        ("Head movement", "head_movement"),
+        ("Body language", "body_language"),
+        ("Gesture direction", "gesture_direction"),
+        ("Acting direction", "acting_direction"),
+    )
 
     parts = [
         f"Mandatory visual style: {style_description}.",
@@ -205,10 +266,20 @@ def enrich_image_prompt(style, character_bible, scene):
         f"Props: {scene.get('props', '')}.",
         f"Camera: {scene.get('camera', '')}.",
         str(scene.get("image_prompt", "")),
+    ]
+
+    for label, field in acting_fields:
+        value = str(scene.get(field, "")).strip()
+        if value:
+            parts.append(f"{label}: {value}.")
+
+    parts.extend([
         "Vertical 9:16 cinematic composition.",
         "Preserve recurring characters' faces and clothing.",
+        "Use believable facial anatomy and natural expressions.",
+        "Keep eye direction and character eyelines consistent.",
         "No text, subtitles, logos or watermarks.",
-    ]
+    ])
 
     return " ".join(str(part) for part in parts if part)
 
@@ -236,27 +307,38 @@ def validate_script(data, target_seconds=60):
     if not data.get("title"):
         errors.append("Missing title.")
 
-    if not 8 <= len(scenes) <= 12:
-        warnings.append("Expected between 8 and 12 scenes.")
+    if not 8 <= len(scenes) <= 15:
+        warnings.append("Expected between 8 and 15 scenes.")
 
     characters = data.get("characters")
     character_ids = set()
     new_format = characters is not None
 
     if new_format:
-        if not isinstance(characters, list) or not 2 <= len(characters) <= 8:
-            errors.append("Cast must contain between 2 and 8 characters.")
+        if (
+            not isinstance(characters, list)
+            or not 2 <= len(characters) <= 8
+        ):
+            errors.append(
+                "Cast must contain between 2 and 8 characters."
+            )
         else:
             for character in characters:
                 if not isinstance(character, dict):
                     errors.append("Invalid character entry.")
                     continue
 
-                character_id = str(character.get("id", "")).strip()
-                name = str(character.get("name", "")).strip()
+                character_id = str(
+                    character.get("id", "")
+                ).strip()
+                name = str(
+                    character.get("name", "")
+                ).strip()
 
                 if not character_id or not name:
-                    errors.append("Every character needs an ID and name.")
+                    errors.append(
+                        "Every character needs an ID and name."
+                    )
                     continue
 
                 if character_id in character_ids:
@@ -275,12 +357,16 @@ def validate_script(data, target_seconds=60):
             errors.append(f"Scene {number} is invalid.")
             continue
 
-        narration = str(scene.get("narration", "")).strip()
+        narration = str(
+            scene.get("narration", "")
+        ).strip()
         narration_parts.append(narration)
 
         for field in ("image_prompt", "motion_prompt", "sound"):
             if not str(scene.get(field, "")).strip():
-                errors.append(f"Scene {number}: missing {field}.")
+                errors.append(
+                    f"Scene {number}: missing {field}."
+                )
 
         turns = scene.get("dialogue_turns", [])
 
@@ -303,8 +389,12 @@ def validate_script(data, target_seconds=60):
                     )
                     continue
 
-                speaker = str(turn.get("speaker", "")).strip()
-                dialogue_text = str(turn.get("text", "")).strip()
+                speaker = str(
+                    turn.get("speaker", "")
+                ).strip()
+                dialogue_text = str(
+                    turn.get("text", "")
+                ).strip()
 
                 if speaker not in character_ids:
                     errors.append(
@@ -319,7 +409,9 @@ def validate_script(data, target_seconds=60):
 
                 total_dialogue_turns += 1
 
-        image_prompt = str(scene.get("image_prompt", "")).strip()
+        image_prompt = str(
+            scene.get("image_prompt", "")
+        ).strip()
 
         if len(image_prompt) < 40:
             warnings.append(
@@ -329,11 +421,42 @@ def validate_script(data, target_seconds=60):
         if image_prompt:
             image_prompts.append(image_prompt.lower())
 
+        for field in (
+            "facial_expression",
+            "gaze_direction",
+            "body_language",
+            "acting_direction",
+        ):
+            if not str(scene.get(field, "")).strip():
+                warnings.append(
+                    f"Scene {number}: missing acting detail '{field}'."
+                )
+
+        for turn_number, turn in enumerate(turns, 1):
+            if not isinstance(turn, dict):
+                continue
+
+            if not str(turn.get("facial_expression", "")).strip():
+                warnings.append(
+                    f"Scene {number}, turn {turn_number}: "
+                    "missing speaker facial expression."
+                )
+
+            if not str(turn.get("mouth_action", "")).strip():
+                warnings.append(
+                    f"Scene {number}, turn {turn_number}: "
+                    "missing mouth action direction."
+                )
+
     if new_format and total_dialogue_turns == 0:
-        errors.append("Character-driven script contains no dialogue.")
+        errors.append(
+            "Character-driven script contains no dialogue."
+        )
 
     if len(image_prompts) != len(set(image_prompts)):
-        warnings.append("Some scenes have duplicate image prompts.")
+        warnings.append(
+            "Some scenes have duplicate image prompts."
+        )
 
     narration = " ".join(narration_parts)
     word_count = len(narration.split())
@@ -355,4 +478,6 @@ def validate_script(data, target_seconds=60):
         "character_count": len(character_ids),
         "dialogue_turn_count": total_dialogue_turns,
     }
+
+
 

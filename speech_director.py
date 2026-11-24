@@ -1,4 +1,5 @@
-"""Character voice and dialogue scheduling utilities."""
+
+"""Character voice profiles and dialogue scheduling utilities."""
 
 GEMINI_VOICES = [
     "Charon",
@@ -11,21 +12,37 @@ GEMINI_VOICES = [
     "Zephyr",
 ]
 
+# Ücretsiz seçenekler önce gelir.
+# Ücretli xAI otomatik olarak devreye sokulmamalıdır.
+DEFAULT_TTS_ORDER = ["gemini", "edge", "gtts", "xai"]
+
+FREE_TTS_PROVIDERS = ["gemini", "edge", "gtts"]
+PAID_TTS_PROVIDERS = ["xai"]
+
+
+def _clean(value, default=""):
+    if value is None:
+        return default
+    return str(value).strip()
+
 
 def build_voice_profiles(characters):
     """Create stable voice settings for every character."""
     if not isinstance(characters, list):
         raise ValueError("Characters must be a list.")
 
+    if not 2 <= len(characters) <= 8:
+        raise ValueError("Cast must contain 2 to 8 characters.")
+
     profiles = {}
     used_gemini_voices = set()
 
     for index, character in enumerate(characters):
         if not isinstance(character, dict):
-            continue
+            raise ValueError("Every character must be an object.")
 
-        character_id = str(character.get("id", "")).strip()
-        name = str(character.get("name", "")).strip()
+        character_id = _clean(character.get("id"))
+        name = _clean(character.get("name"))
 
         if not character_id or not name:
             raise ValueError("Every character needs an ID and name.")
@@ -37,9 +54,25 @@ def build_voice_profiles(characters):
         if not isinstance(voice, dict):
             voice = {}
 
-        gemini_voice = str(
-            voice.get("gemini") or GEMINI_VOICES[index % len(GEMINI_VOICES)]
-        ).strip()
+        gender = _clean(
+            character.get("voice_gender"), "male"
+        ).lower()
+
+        edge_default = (
+            "tr-TR-EmelNeural"
+            if gender == "female"
+            else "tr-TR-AhmetNeural"
+        )
+
+        gemini_voice = _clean(
+            voice.get("gemini"),
+            GEMINI_VOICES[index % len(GEMINI_VOICES)],
+        )
+
+        if gemini_voice not in GEMINI_VOICES:
+            raise ValueError(
+                f"Unsupported Gemini voice for {name}: {gemini_voice}"
+            )
 
         if gemini_voice in used_gemini_voices:
             raise ValueError(
@@ -48,28 +81,53 @@ def build_voice_profiles(characters):
 
         used_gemini_voices.add(gemini_voice)
 
-        gender = str(character.get("voice_gender", "male")).lower()
-        edge_default = (
-            "tr-TR-EmelNeural"
-            if gender == "female"
-            else "tr-TR-AhmetNeural"
-        )
+        custom_order = voice.get("provider_order")
+
+        if isinstance(custom_order, list):
+            requested = [
+                _clean(item).lower()
+                for item in custom_order
+                if _clean(item)
+            ]
+
+            # Karakter ayarları ücretsiz önceliği bozamaz.
+            provider_order = [
+                item for item in FREE_TTS_PROVIDERS
+                if item in requested
+            ]
+
+            provider_order.extend(
+                item for item in FREE_TTS_PROVIDERS
+                if item not in provider_order
+            )
+
+            # xAI yalnızca listenin sonunda tutulur.
+            if "xai" in requested:
+                provider_order.append("xai")
+        else:
+            provider_order = list(DEFAULT_TTS_ORDER)
 
         profiles[character_id] = {
             "character_id": character_id,
             "name": name,
-            "gemini": gemini_voice,
-            "edge": str(voice.get("edge") or edge_default).strip(),
-            "personality": str(
-                character.get("personality", "")
-            ).strip(),
-            "voice_description": str(
-                character.get("voice", "")
-            ).strip(),
-        }
 
-    if not 2 <= len(profiles) <= 8:
-        raise ValueError("Cast must contain 2 to 8 characters.")
+            "xai": _clean(voice.get("xai")),
+            "gemini": gemini_voice,
+            "edge": _clean(voice.get("edge"), edge_default),
+
+            "personality": _clean(
+                character.get("personality")
+            ),
+            "voice_description": _clean(
+                character.get("voice")
+            ),
+            "voice_gender": gender,
+
+            "provider_order": provider_order,
+            "free_providers": list(FREE_TTS_PROVIDERS),
+            "paid_providers": list(PAID_TTS_PROVIDERS),
+            "paid_provider_requires_approval": True,
+        }
 
     return profiles
 
@@ -97,39 +155,51 @@ def build_speech_schedule(scenes, characters):
             if not isinstance(turn, dict):
                 raise ValueError("Invalid dialogue turn.")
 
-            speaker = str(turn.get("speaker", "")).strip()
-            text = str(turn.get("text", "")).strip()
+            speaker = _clean(turn.get("speaker"))
+            dialogue = _clean(turn.get("text"))
 
             if speaker not in profiles:
                 raise ValueError(
                     f"Unknown speaker in scene {scene_index + 1}: {speaker}"
                 )
 
-            if not text:
+            if not dialogue:
                 raise ValueError("Dialogue text cannot be empty.")
 
-            profile = profiles[speaker]
+            raw_listeners = turn.get("listener_ids", [])
+            if not isinstance(raw_listeners, list):
+                raise ValueError("listener_ids must be a list.")
+
+            listeners = []
+
+            for listener in raw_listeners:
+                listener_id = _clean(listener)
+
+                if (
+                    listener_id in profiles
+                    and listener_id != speaker
+                    and listener_id not in listeners
+                ):
+                    listeners.append(listener_id)
 
             schedule.append({
                 "scene_index": scene_index,
                 "turn_index": turn_index,
                 "speaker_id": speaker,
-                "speaker_name": profile["name"],
-                "text": text,
-                "voice": profile,
-                "emotion": str(
-                    turn.get("emotion", "neutral")
-                ).strip(),
-                "delivery": str(
-                    turn.get("delivery", "natural")
-                ).strip(),
-                "listener_ids": [
-                    item for item in turn.get("listener_ids", [])
-                    if item in profiles and item != speaker
-                ],
+                "speaker_name": profiles[speaker]["name"],
+                "text": dialogue,
+                "voice": profiles[speaker],
+                "emotion": _clean(
+                    turn.get("emotion"), "neutral"
+                ),
+                "delivery": _clean(
+                    turn.get("delivery"), "natural"
+                ),
+                "listener_ids": listeners,
             })
 
     if not schedule:
         raise ValueError("The film contains no character dialogue.")
 
     return schedule
+
