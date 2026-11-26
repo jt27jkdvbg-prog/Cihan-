@@ -1,4 +1,3 @@
-
 """Generate and validate persistent visual reference assets for film characters.
 
 The generator reuses the image providers already implemented in generate.py.
@@ -103,15 +102,16 @@ def _character_prompt(project: FilmProject, character: Any) -> str:
         )
 
     details.append(
-        "Create one original fictional character reference image. "
-        "Show one person only, full body, standing in a neutral relaxed "
-        "pose, with the face clearly visible and unobstructed. "
-        "Keep the character centered and fully inside the frame. "
-        "Use a simple neutral studio background and even professional "
-        "lighting. Preserve the described facial features, hairstyle, "
-        "body proportions and clothing. Realistic anatomy, natural hands, "
-        "clear silhouette, high detail. No extra people, no collage, "
-        "no split screen, no labels, no captions, no logos, no watermark."
+        "Create one original fictional adult character reference image. "
+        "Show one person only, fully clothed, in a neutral and relaxed "
+        "standing pose. Use a full-length portrait with the face clearly "
+        "visible and unobstructed. Keep the person centered and fully "
+        "inside the frame. Use a simple neutral studio background and "
+        "even professional lighting. Preserve the described facial "
+        "features, hairstyle, overall silhouette and clothing. "
+        "Use natural proportions, realistic hands and a clear silhouette. "
+        "High detail. No extra people, no collage, no split screen, "
+        "no labels, no captions, no logos and no watermark."
     )
 
     return " ".join(details)
@@ -501,4 +501,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
