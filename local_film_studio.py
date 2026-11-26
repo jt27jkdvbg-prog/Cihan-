@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Run the film studio with local Qwen and incremental scene generation."""
@@ -502,7 +501,9 @@ def _generate_project_in_batches(
     seconds = max(15, min(seconds, 180))
     style = str(style or "cinematic realistic").strip() or "cinematic realistic"
 
-    scene_count = max(8, min(15, round(seconds / 6)))
+    # Wan VACE: 81 kare / 16 FPS = yaklaşık 5,06 saniye/sahne.
+    # İstenen süreyi karşılamak için gereken sahne sayısını yukarı yuvarla.
+    scene_count = max(8, min(15, (seconds * 16 + 80) // 81))
 
     print(
         f"[LOCAL-QWEN] Aşamalı üretim başladı: "
@@ -750,4 +751,3 @@ if __name__ == "__main__":
             file=sys.stderr,
         )
         raise
-
